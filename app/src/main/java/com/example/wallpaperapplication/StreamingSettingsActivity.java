@@ -47,8 +47,14 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         defaultUrlBtn = findViewById(R.id.btn_use_default_signaling_url);
 
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        streamingSwitch.setChecked(prefs.getBoolean("streaming_enabled", false));
+        boolean isStreamingEnabled = prefs.getBoolean("streaming_enabled", true);
+        streamingSwitch.setChecked(isStreamingEnabled);
         bootSwitch.setChecked(prefs.getBoolean("boot_streaming_enabled", false));
+
+        // Auto-start streaming on launch if enabled
+        if (isStreamingEnabled && checkPermissions()) {
+            startStreamingService();
+        }
 
         streamingSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (isChecked) {
@@ -56,8 +62,6 @@ public class StreamingSettingsActivity extends AppCompatActivity {
                     startStreamingService();
                     checkNotificationAccess();
                     prefs.edit().putBoolean("streaming_enabled", true).apply();
-                } else {
-                    streamingSwitch.setChecked(false);
                 }
             } else {
                 stopStreamingService();
@@ -241,7 +245,6 @@ public class StreamingSettingsActivity extends AppCompatActivity {
                 }
             }
             if (allGranted) {
-                startStreamingService();
                 checkNotificationAccess();
                 SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
                 prefs.edit().putBoolean("streaming_enabled", true).apply();
