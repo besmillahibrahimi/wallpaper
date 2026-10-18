@@ -28,6 +28,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     private var backTrack: VideoTrack? = null
     private var frontTrack: VideoTrack? = null
 
+    var isBackRunning: Boolean = false
+        private set
+    var isFrontRunning: Boolean = false
+        private set
+
     fun initialize(factory: PeerConnectionFactory) {
         this.factory = factory
         setupCapturers()
@@ -51,7 +56,8 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
                     backSource = f.createVideoSource(false)
                     backSource?.let {
                         backCapturer?.initialize(backHelper, context.applicationContext, it.capturerObserver)
-                        backTrack = f.createVideoTrack("back_video", it)
+                        backTrack = f.createVideoTrack("back_camera", it)
+                        backTrack?.setEnabled(false)
                     }
                     Log.d("CameraManager", "Back camera initialized: $name")
                 } catch (e: Exception) {
@@ -70,7 +76,8 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
                     frontSource = f.createVideoSource(false)
                     frontSource?.let {
                         frontCapturer?.initialize(frontHelper, context.applicationContext, it.capturerObserver)
-                        frontTrack = f.createVideoTrack("front_video", it)
+                        frontTrack = f.createVideoTrack("front_camera", it)
+                        frontTrack?.setEnabled(false)
                     }
                     Log.d("CameraManager", "Front camera initialized: $name")
                 } catch (e: Exception) {
@@ -82,43 +89,81 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     }
 
     fun startBackCamera() {
+        if (isBackRunning) return
         try {
             backCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
+            isBackRunning = true
+            backTrack?.setEnabled(true)
+            Log.d("CameraManager", "Started back camera capture")
         } catch (e: Exception) {
             Log.e("CameraManager", "Failed to start back camera", e)
         }
     }
 
+    fun stopBackCamera() {
+        if (!isBackRunning) return
+        try {
+            backCapturer?.stopCapture()
+            isBackRunning = false
+            backTrack?.setEnabled(false)
+            Log.d("CameraManager", "Stopped back camera capture")
+        } catch (e: Exception) {
+            Log.e("CameraManager", "Error stopping back camera", e)
+        }
+    }
+
     fun startFrontCamera() {
+        if (isFrontRunning) return
         try {
             frontCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
+            isFrontRunning = true
+            frontTrack?.setEnabled(true)
+            Log.d("CameraManager", "Started front camera capture")
         } catch (e: Exception) {
             Log.e("CameraManager", "Failed to start front camera", e)
+        }
+    }
+
+    fun stopFrontCamera() {
+        if (!isFrontRunning) return
+        try {
+            frontCapturer?.stopCapture()
+            isFrontRunning = false
+            frontTrack?.setEnabled(false)
+            Log.d("CameraManager", "Stopped front camera capture")
+        } catch (e: Exception) {
+            Log.e("CameraManager", "Error stopping front camera", e)
         }
     }
 
     fun changeResolution(width: Int, height: Int, fps: Int) {
         Log.d("CameraManager", "Changing capturing resolution to: ${width}x${height} @ ${fps}fps")
         try {
+            val wasBack = isBackRunning
+            val wasFront = isFrontRunning
             // Stop active capturers
             stopCapturers()
             // Small delay to let camera hardware release
             Thread.sleep(200)
-            // Re-start with new parameters
-            backCapturer?.startCapture(width, height, fps)
-            frontCapturer?.startCapture(width, height, fps)
+            // Re-start active ones with new parameters
+            if (wasBack) {
+                backCapturer?.startCapture(width, height, fps)
+                isBackRunning = true
+                backTrack?.setEnabled(true)
+            }
+            if (wasFront) {
+                frontCapturer?.startCapture(width, height, fps)
+                isFrontRunning = true
+                frontTrack?.setEnabled(true)
+            }
         } catch (e: Exception) {
             Log.e("CameraManager", "Error changing camera capturing parameters", e)
         }
     }
 
     fun stopCapturers() {
-        try {
-            backCapturer?.stopCapture()
-            frontCapturer?.stopCapture()
-        } catch (e: Exception) {
-            Log.e("CameraManager", "Error stopping capturers", e)
-        }
+        stopBackCamera()
+        stopFrontCamera()
     }
 
     /**
@@ -182,6 +227,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
             return
         }
 
+        val wasRunning = if (useFrontCamera) isFrontRunning else isBackRunning
+        if (!wasRunning) {
+            if (useFrontCamera) startFrontCamera() else startBackCamera()
+        }
+
         val sink = object : VideoSink {
             @Volatile
             var captured = false
@@ -221,6 +271,9 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
                     // Remove this one-shot sink from the track on the main thread
                     Handler(Looper.getMainLooper()).post {
                         try { track.removeSink(this) } catch (_: Exception) {}
+                        if (!wasRunning) {
+                            if (useFrontCamera) stopFrontCamera() else stopBackCamera()
+                        }
                     }
                 }
             }

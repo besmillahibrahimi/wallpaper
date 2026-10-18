@@ -36,7 +36,7 @@ public class DataSyncWorker extends Worker {
         // We use checkSelfPermission inside startService safety, but here we just try to start it.
         try {
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
-            if (prefs.getBoolean("streaming_enabled", false)) {
+            if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
                 Intent intent = new Intent(context, StreamingService.class);
                 ContextCompat.startForegroundService(context, intent);
             }

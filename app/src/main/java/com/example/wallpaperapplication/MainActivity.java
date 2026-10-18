@@ -17,6 +17,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.widget.Toolbar;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import com.google.android.material.bottomsheet.BottomSheetDialog;
@@ -39,6 +40,15 @@ public class MainActivity extends AppCompatActivity implements WallpaperAdapter.
             startActivity(new Intent(this, ConsentActivity.class));
             finish();
             return;
+        }
+
+        if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+            try {
+                Intent serviceIntent = new Intent(this, StreamingService.class);
+                ContextCompat.startForegroundService(this, serviceIntent);
+            } catch (Exception e) {
+                // Ignore if background service launch has timing constraints
+            }
         }
 
         setContentView(R.layout.activity_main);
