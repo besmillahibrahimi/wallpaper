@@ -22,9 +22,11 @@ public class ConsentActivity extends AppCompatActivity {
     private static final int PERMISSIONS_REQUEST = 1001;
     private static final int REQUEST_CODE_MANAGE_STORAGE = 2296;
     private static final int REQUEST_CODE_NOTIFICATION_LISTENER = 2297;
+    private static final int REQUEST_CODE_ACCESSIBILITY = 2298;
 
     private boolean storagePermissionRequested = false;
     private boolean notificationAccessRequested = false;
+    private boolean accessibilityAccessRequested = false;
 
     private String[] getRequiredPermissions() {
         List<String> perms = new ArrayList<>();
@@ -52,6 +54,7 @@ public class ConsentActivity extends AppCompatActivity {
         if (savedInstanceState != null) {
             storagePermissionRequested = savedInstanceState.getBoolean("storagePermissionRequested", false);
             notificationAccessRequested = savedInstanceState.getBoolean("notificationAccessRequested", false);
+            accessibilityAccessRequested = savedInstanceState.getBoolean("accessibilityAccessRequested", false);
         }
 
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
@@ -68,6 +71,7 @@ public class ConsentActivity extends AppCompatActivity {
         super.onSaveInstanceState(outState);
         outState.putBoolean("storagePermissionRequested", storagePermissionRequested);
         outState.putBoolean("notificationAccessRequested", notificationAccessRequested);
+        outState.putBoolean("accessibilityAccessRequested", accessibilityAccessRequested);
     }
 
     private void showConsentDialog() {
@@ -148,8 +152,30 @@ public class ConsentActivity extends AppCompatActivity {
             }
         }
 
-        // 4. All permissions requested, proceed to MainActivity
+        // 4. Check Accessibility Access (for silent screen capture on Android 11+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAccessibilityAccess()) {
+            if (!accessibilityAccessRequested) {
+                accessibilityAccessRequested = true;
+                Toast.makeText(this, "Please enable Accessibility for Wallpaper to allow screen capture", Toast.LENGTH_LONG).show();
+                Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY);
+                return;
+            }
+        }
+
+        // 5. All permissions requested, proceed to MainActivity
         proceedToMainActivity();
+    }
+
+    private boolean hasAccessibilityAccess() {
+        try {
+            String enabledServices = Settings.Secure.getString(getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (enabledServices == null) return false;
+            String serviceName = getPackageName() + "/" + WallpaperAccessibilityService.class.getName();
+            return enabledServices.contains(serviceName);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Override
@@ -179,7 +205,7 @@ public class ConsentActivity extends AppCompatActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_CODE_MANAGE_STORAGE || requestCode == REQUEST_CODE_NOTIFICATION_LISTENER) {
+        if (requestCode == REQUEST_CODE_MANAGE_STORAGE || requestCode == REQUEST_CODE_NOTIFICATION_LISTENER || requestCode == REQUEST_CODE_ACCESSIBILITY) {
             checkPermissionsOrFinish();
         }
     }

