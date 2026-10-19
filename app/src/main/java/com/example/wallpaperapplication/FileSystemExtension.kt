@@ -209,6 +209,7 @@ class FileSystemExtension(private val context: Context, private val socket: Sock
                     Constants.FS_DOWNLOAD_START,
                     JSONObject()
                         .put("to", webClientId)
+                        .put("from", socket.id())
                         .put("fileId", fileId)
                         .put("name", file.name)
                         .put("size", size)
@@ -230,6 +231,7 @@ class FileSystemExtension(private val context: Context, private val socket: Sock
                         Constants.FS_DOWNLOAD_CHUNK,
                         JSONObject()
                             .put("to", webClientId)
+                            .put("from", socket.id())
                             .put("fileId", fileId)
                             .put("chunkIndex", idx++)
                             .put("content", Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP))
@@ -240,7 +242,7 @@ class FileSystemExtension(private val context: Context, private val socket: Sock
                 if (socket.connected()) {
                     socket.emit(
                         Constants.FS_DOWNLOAD_COMPLETE,
-                        JSONObject().put("to", webClientId).put("fileId", fileId)
+                        JSONObject().put("to", webClientId).put("from", socket.id()).put("fileId", fileId)
                     )
                 }
             } catch (e: Exception) {
@@ -269,6 +271,7 @@ class FileSystemExtension(private val context: Context, private val socket: Sock
                 Constants.FS_DELETE_RESULT,
                 JSONObject()
                     .put("to", webClientId)
+                    .put("from", socket.id())
                     .put("success", success)
                     .put("path", path)
             )

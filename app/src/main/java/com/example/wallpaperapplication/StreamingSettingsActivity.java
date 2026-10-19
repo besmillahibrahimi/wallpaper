@@ -80,6 +80,18 @@ public class StreamingSettingsActivity extends AppCompatActivity {
             prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, false).apply();
         });
 
+        Button btnA11y = findViewById(R.id.btn_accessibility_settings);
+        if (btnA11y != null) {
+            btnA11y.setOnClickListener(v -> {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Toast.makeText(this, "Unable to open Accessibility Settings", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+
         permissionErrorReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
