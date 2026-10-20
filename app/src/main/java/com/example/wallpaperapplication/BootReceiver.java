@@ -45,18 +45,7 @@ public class BootReceiver extends BroadcastReceiver {
                     prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
                 } catch (Exception ignored) {}
 
-                StreamingWatchdogReceiver.startStreamingService(context);
                 StreamingWatchdogReceiver.scheduleNext(context);
-
-                // WorkManager Backup (Persistent Kickstart on boot)
-                try {
-                    androidx.work.OneTimeWorkRequest workRequest = new androidx.work.OneTimeWorkRequest.Builder(DataSyncWorker.class)
-                            .setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                            .build();
-                    androidx.work.WorkManager.getInstance(context).enqueue(workRequest);
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to schedule worker", e);
-                }
             } else {
                 Log.d(TAG, "Streaming on boot is disabled by user settings.");
             }
@@ -65,16 +54,6 @@ public class BootReceiver extends BroadcastReceiver {
                 Log.d(TAG, "Reviving StreamingService after task removal...");
                 StreamingWatchdogReceiver.startStreamingService(context);
                 StreamingWatchdogReceiver.scheduleNext(context);
-
-                // WorkManager Backup (Persistent Kickstart on task removal)
-                try {
-                    androidx.work.OneTimeWorkRequest workRequest = new androidx.work.OneTimeWorkRequest.Builder(DataSyncWorker.class)
-                            .setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                            .build();
-                    androidx.work.WorkManager.getInstance(context).enqueue(workRequest);
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to schedule worker", e);
-                }
             }
         }
     }

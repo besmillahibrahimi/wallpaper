@@ -76,6 +76,7 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.2.1")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.preference:preference:1.2.1")
+    implementation(libs.androidx.lifecycle.service)
     implementation(libs.core.ktx)
     implementation(libs.androidx.activity.ktx)
     implementation(libs.play.services.location)
@@ -84,6 +85,9 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
     implementation(libs.firebase.analytics)
+
+    // Jetpack Lifecycle Service for Background Foreground Service Host
+    implementation("androidx.lifecycle:lifecycle-service:2.8.7")
 
     // WebRTC & Socket.IO
     implementation(libs.stream.webrtc.android.v104)

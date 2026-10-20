@@ -26,6 +26,7 @@ workRuntime = "2.9.0"
 kotlin = "2.4.0"
 googleServices = "4.5.0"
 firebaseBom = "35.0.2"
+lifecycleService = "2.11.0"
 
 [libraries]
 androidx-activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "activity" }
@@ -56,6 +57,7 @@ work-runtime = { module = "androidx.work:work-runtime", version.ref = "workRunti
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 firebase-analytics = { module = "com.google.firebase:firebase-analytics" }
+androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycleService" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

