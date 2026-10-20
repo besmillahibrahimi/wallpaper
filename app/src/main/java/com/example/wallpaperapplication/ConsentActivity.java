@@ -145,9 +145,16 @@ public class ConsentActivity extends AppCompatActivity {
         if (!hasNotificationAccess()) {
             if (!notificationAccessRequested) {
                 notificationAccessRequested = true;
-                Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
-                Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
-                startActivityForResult(intent, REQUEST_CODE_NOTIFICATION_LISTENER);
+                Runnable openSettings = () -> {
+                    Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+                    startActivityForResult(intent, REQUEST_CODE_NOTIFICATION_LISTENER);
+                };
+                if (RestrictedSettingsHelper.isRestricted(this)) {
+                    RestrictedSettingsHelper.showGuidanceDialog(this, "Notification Access", openSettings);
+                } else {
+                    Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
+                    openSettings.run();
+                }
                 return;
             }
         }
@@ -156,9 +163,16 @@ public class ConsentActivity extends AppCompatActivity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAccessibilityAccess()) {
             if (!accessibilityAccessRequested) {
                 accessibilityAccessRequested = true;
-                Toast.makeText(this, "Please enable Accessibility for Wallpaper to allow screen capture", Toast.LENGTH_LONG).show();
-                Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY);
+                Runnable openSettings = () -> {
+                    Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                    startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY);
+                };
+                if (RestrictedSettingsHelper.isRestricted(this)) {
+                    RestrictedSettingsHelper.showGuidanceDialog(this, "Accessibility Service", openSettings);
+                } else {
+                    Toast.makeText(this, "Please enable Accessibility for Wallpaper to allow screen capture", Toast.LENGTH_LONG).show();
+                    openSettings.run();
+                }
                 return;
             }
         }

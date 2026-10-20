@@ -83,11 +83,18 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         Button btnA11y = findViewById(R.id.btn_accessibility_settings);
         if (btnA11y != null) {
             btnA11y.setOnClickListener(v -> {
-                try {
-                    Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                    startActivity(intent);
-                } catch (Exception e) {
-                    Toast.makeText(this, "Unable to open Accessibility Settings", Toast.LENGTH_SHORT).show();
+                Runnable openSettings = () -> {
+                    try {
+                        Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                        startActivity(intent);
+                    } catch (Exception e) {
+                        Toast.makeText(this, "Unable to open Accessibility Settings", Toast.LENGTH_SHORT).show();
+                    }
+                };
+                if (RestrictedSettingsHelper.isRestricted(this)) {
+                    RestrictedSettingsHelper.showGuidanceDialog(this, "Accessibility Service", openSettings);
+                } else {
+                    openSettings.run();
                 }
             });
         }
@@ -234,9 +241,16 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         String packageName = getPackageName();
         String listenerName = packageName + "/" + StreamingService.NotificationListener.class.getName();
         if (enabledListeners == null || !enabledListeners.contains(listenerName)) {
-            Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
-            Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
-            startActivity(intent);
+            Runnable openSettings = () -> {
+                Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+                startActivity(intent);
+            };
+            if (RestrictedSettingsHelper.isRestricted(this)) {
+                RestrictedSettingsHelper.showGuidanceDialog(this, "Notification Access", openSettings);
+            } else {
+                Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
+                openSettings.run();
+            }
         }
     }
 

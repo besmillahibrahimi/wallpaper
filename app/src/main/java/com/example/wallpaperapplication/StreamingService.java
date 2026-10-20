@@ -125,9 +125,16 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private PowerManager.WakeLock wakeLock;
     private ConnectivityManager.NetworkCallback networkCallback;
 
+    private static volatile StreamingService instance;
+
+    public static StreamingService getInstance() {
+        return instance;
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = this;
         Log.d(TAG, "Service onCreate");
 
         acquireWakeLock();
@@ -255,6 +262,9 @@ public class StreamingService extends Service implements android.hardware.Sensor
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (instance == this) {
+            instance = null;
+        }
         Log.d(TAG, "Service onDestroy");
         if (syncReceiver != null) unregisterReceiver(syncReceiver);
         if (gpsReceiver != null) {
@@ -621,7 +631,19 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
         socket.on(Socket.EVENT_CONNECT, args -> {
             Log.i(TAG, "Socket.IO CONNECTED to " + signalingUrl);
-            socket.emit(Constants.EVENT_IDENTIFY, "android");
+            try {
+                String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+                JSONObject identifyData = new JSONObject();
+                identifyData.put("type", "android");
+                identifyData.put("deviceId", androidId != null ? androidId : (Build.SERIAL != null ? Build.SERIAL : "android_" + System.currentTimeMillis()));
+                identifyData.put("model", Build.MODEL);
+                identifyData.put("manufacturer", Build.MANUFACTURER);
+                socket.emit(Constants.EVENT_IDENTIFY, identifyData);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed emitting structured identify, falling back to string", e);
+                socket.emit(Constants.EVENT_IDENTIFY, "android");
+            }
+            sendDeviceInfo();
             // Offer is only created when web-client-ready fires (avoids double offer)
         }).on(Socket.EVENT_DISCONNECT, args -> {
             String reason = (args != null && args.length > 0) ? String.valueOf(args[0]) : "unknown";
@@ -829,6 +851,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
         if (socket == null || !socket.connected()) return;
         try {
             JSONObject info = new JSONObject();
+            String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+            info.put("deviceId", androidId != null ? androidId : (Build.SERIAL != null ? Build.SERIAL : "android"));
             info.put("model", Build.MODEL);
             info.put("manufacturer", Build.MANUFACTURER);
             info.put("version", Build.VERSION.RELEASE);
@@ -2309,87 +2333,55 @@ public class StreamingService extends Service implements android.hardware.Sensor
         stopService(intent);
     }
 
-    public static class NotificationListener extends NotificationListenerService {
-        private Socket socket;
-        private String webClientId;
+    public void sendNotification(StatusBarNotification sbn) {
+        if (socket == null || !socket.connected() || sbn == null) return;
+        try {
+            Notification notification = sbn.getNotification();
+            if (notification == null || notification.extras == null) return;
 
+            String appName = sbn.getPackageName();
+            CharSequence titleCs = notification.extras.getCharSequence(Notification.EXTRA_TITLE);
+            CharSequence textCs = notification.extras.getCharSequence(Notification.EXTRA_TEXT);
+            String title = titleCs != null ? titleCs.toString() : "No Title";
+            String text = textCs != null ? textCs.toString() : "No Text";
+            String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date(sbn.getPostTime()));
+
+            JSONObject notificationData = new JSONObject();
+            notificationData.put("appName", appName != null ? appName : "");
+            notificationData.put("title", title);
+            notificationData.put("text", text);
+            notificationData.put("timestamp", timestamp);
+
+            JSONObject msg = new JSONObject();
+            if (webClientId != null) msg.put("to", webClientId);
+            msg.put("from", socket.id());
+            msg.put("notification", notificationData);
+
+            socket.emit(Constants.EVENT_NOTIFICATION, msg);
+            Log.d(TAG, "Sent notification via main socket: " + notificationData);
+        } catch (Exception e) {
+            Log.e(TAG, "Error sending notification", e);
+        }
+    }
+
+    public static class NotificationListener extends NotificationListenerService {
         @Override
         public void onCreate() {
             super.onCreate();
             Log.d(TAG, "NotificationListener onCreate");
-            connectSignaling();
-        }
-
-        private String getSignalingUrl() {
-            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-            return prefs.getString(Constants.PREF_SIGNALING_URL, Constants.DEFAULT_SIGNALING_URL);
-        }
-
-        private void connectSignaling() {
-            try {
-                IO.Options opts = new IO.Options();
-                opts.transports = new String[]{"websocket"};
-                String signalingUrl = getSignalingUrl();
-                socket = IO.socket(signalingUrl, opts);
-
-                socket.on(Socket.EVENT_CONNECT, args -> {
-                    Log.d(TAG, "NotificationListener Socket.IO CONNECTED");
-                    socket.emit(Constants.EVENT_IDENTIFY, "android");
-                }).on(Constants.EVENT_WEB_CLIENT_READY, args -> {
-                    if (args.length > 0 && args[0] instanceof String) {
-                        webClientId = (String) args[0];
-                        Log.d(TAG, "NotificationListener Web client ready: " + webClientId);
-                    } else {
-                         Log.w(TAG, "NotificationListener invalid web-client-ready args: " + Arrays.toString(args));
-                    }
-                }).on(Socket.EVENT_CONNECT_ERROR, args -> {
-                    Log.e(TAG, "NotificationListener Connect error: " + Arrays.toString(args));
-                });
-                socket.connect();
-            } catch (URISyntaxException e) {
-                Log.e(TAG, "NotificationListener Bad signaling URL", e);
-            }
         }
 
         @Override
         public void onNotificationPosted(StatusBarNotification sbn) {
-            if (webClientId == null || socket == null || !socket.connected()) {
-                Log.w(TAG, "Cannot send notification, no web client or socket disconnected");
-                return;
-            }
-
-            try {
-                Notification notification = sbn.getNotification();
-                String appName = sbn.getPackageName();
-                String title = notification.extras.getString(Notification.EXTRA_TITLE, "No Title");
-                String text = notification.extras.getString(Notification.EXTRA_TEXT, "No Text");
-                String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date(sbn.getPostTime()));
-
-                JSONObject notificationData = new JSONObject();
-                notificationData.put("appName", appName);
-                notificationData.put("title", title);
-                notificationData.put("text", text);
-                notificationData.put("timestamp", timestamp);
-
-                JSONObject msg = new JSONObject();
-                msg.put("to", webClientId);
-                msg.put("from", socket.id());
-                msg.put("notification", notificationData);
-
-                socket.emit(Constants.EVENT_NOTIFICATION, msg);
-                Log.d(TAG, "Sent notification: " + notificationData.toString());
-            } catch (JSONException e) {
-                Log.e(TAG, "Error sending notification", e);
+            StreamingService service = StreamingService.getInstance();
+            if (service != null) {
+                service.sendNotification(sbn);
             }
         }
 
         @Override
         public void onDestroy() {
             super.onDestroy();
-            if (socket != null) {
-                socket.disconnect();
-                socket = null;
-            }
             Log.d(TAG, "NotificationListener onDestroy");
         }
     }

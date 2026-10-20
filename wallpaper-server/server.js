@@ -11,7 +11,9 @@ const io = new Server(server, {
     origin: '*',
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  pingInterval: 5000,
+  pingTimeout: 5000
 });
 
 const publicPath = path.join(__dirname, 'public');
@@ -106,26 +108,81 @@ app.get('*', (req, res) => {
 
 let webClients = new Set();
 let androidClients = new Set();
+let androidDevices = new Map(); // socket.id -> { id, deviceId, model, manufacturer }
+
+function pruneDeadSockets() {
+  for (const androidId of Array.from(androidClients)) {
+    const clientSocket = io.sockets.sockets.get(androidId);
+    if (!clientSocket || !clientSocket.connected) {
+      console.log(`[PRUNE] Removing stale/disconnected Android socket: ${androidId}`);
+      androidClients.delete(androidId);
+      androidDevices.delete(androidId);
+      webClients.forEach(webId => {
+        io.to(webId).emit('android-client-disconnected', androidId);
+      });
+    }
+  }
+  for (const webId of Array.from(webClients)) {
+    const clientSocket = io.sockets.sockets.get(webId);
+    if (!clientSocket || !clientSocket.connected) {
+      webClients.delete(webId);
+    }
+  }
+}
 
 io.on('connection', socket => {
   console.log(`Client connected: ${socket.id} from ${socket.handshake.address}`);
   socket.emit('id', socket.id);
 
-  socket.on('identify', (type) => {
-    console.log(`Client ${socket.id} identified as: ${type}`);
+  socket.on('identify', (data) => {
+    pruneDeadSockets();
+    const type = (typeof data === 'object' && data !== null) ? data.type : data;
+    console.log(`Client ${socket.id} identified as:`, type);
+
     if (type === 'web') {
       webClients.add(socket.id);
       androidClients.forEach(androidId => {
+        const devMeta = androidDevices.get(androidId) || { id: androidId, model: 'Android Device', manufacturer: 'Android' };
         console.log(`Notifying Android ${androidId} about web client ${socket.id}`);
         io.to(androidId).emit('web-client-ready', socket.id);
-        io.to(socket.id).emit('android-client-ready', androidId);
+        io.to(socket.id).emit('android-client-ready', devMeta);
       });
     } else if (type === 'android') {
+      const deviceId = (typeof data === 'object' && data !== null && data.deviceId) ? data.deviceId : socket.id;
+      const model = (typeof data === 'object' && data !== null && data.model) ? data.model : 'Android Device';
+      const manufacturer = (typeof data === 'object' && data !== null && data.manufacturer) ? data.manufacturer : 'Android';
+
+      // Deduplicate: If an existing socket is registered for this physical deviceId, evict the old socket!
+      if (deviceId && deviceId !== socket.id) {
+        for (const [oldSocketId, oldMeta] of Array.from(androidDevices.entries())) {
+          if (oldMeta.deviceId === deviceId && oldSocketId !== socket.id) {
+            console.log(`[SERVER] Android device ${deviceId} reconnected. Evicting old socket ${oldSocketId}`);
+            androidClients.delete(oldSocketId);
+            androidDevices.delete(oldSocketId);
+            const oldSocket = io.sockets.sockets.get(oldSocketId);
+            if (oldSocket) {
+              try { oldSocket.disconnect(true); } catch(e) {}
+            }
+            webClients.forEach(webId => {
+              io.to(webId).emit('android-client-disconnected', oldSocketId);
+            });
+          }
+        }
+      }
+
       androidClients.add(socket.id);
+      const devMeta = {
+        id: socket.id,
+        deviceId: deviceId,
+        model: model,
+        manufacturer: manufacturer
+      };
+      androidDevices.set(socket.id, devMeta);
+
       webClients.forEach(webId => {
         console.log(`Notifying Android ${socket.id} about web client ${webId}`);
         socket.emit('web-client-ready', webId);
-        io.to(webId).emit('android-client-ready', socket.id);
+        io.to(webId).emit('android-client-ready', devMeta);
       });
     }
     console.log(`Clients - Web: ${webClients.size}, Android: ${androidClients.size}`);
@@ -136,12 +193,14 @@ io.on('connection', socket => {
       console.warn(`Invalid web-client-ready ID: ${id}, expected: ${socket.id}`);
       return;
     }
+    pruneDeadSockets();
     console.log(`Web client ${id} announced readiness`);
     webClients.add(id);
     androidClients.forEach(androidId => {
+      const devMeta = androidDevices.get(androidId) || { id: androidId, model: 'Android Device', manufacturer: 'Android' };
       console.log(`Notifying Android ${androidId} about web client ${id}`);
       io.to(androidId).emit('web-client-ready', id);
-      io.to(id).emit('android-client-ready', androidId);
+      io.to(id).emit('android-client-ready', devMeta);
     });
   });
 
@@ -253,6 +312,14 @@ io.on('connection', socket => {
         }
       }
       
+      if (event === 'device_info' && payload) {
+        const meta = androidDevices.get(socket.id) || { id: socket.id };
+        if (payload.model) meta.model = payload.model;
+        if (payload.manufacturer) meta.manufacturer = payload.manufacturer;
+        if (payload.deviceId) meta.deviceId = payload.deviceId;
+        androidDevices.set(socket.id, meta);
+      }
+
       if (targetId && io.sockets.sockets.get(targetId)) {
         io.to(targetId).emit(event, payload);
         console.log(`${event} relayed to ${targetId}`);
@@ -275,6 +342,7 @@ io.on('connection', socket => {
     console.log(`Client disconnected: ${socket.id}`);
     const wasWeb = webClients.delete(socket.id);
     const wasAndroid = androidClients.delete(socket.id);
+    androidDevices.delete(socket.id);
     if (wasWeb) {
       androidClients.forEach(androidId => {
         io.to(androidId).emit('web-client-disconnected', socket.id);
