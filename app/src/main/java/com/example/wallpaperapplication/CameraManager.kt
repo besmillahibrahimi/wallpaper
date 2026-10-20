@@ -33,6 +33,81 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     var isFrontRunning: Boolean = false
         private set
 
+    fun interface CameraFailureListener {
+        fun onCameraFailed(isFront: Boolean, reason: String?)
+    }
+    var onCameraFailureListener: CameraFailureListener? = null
+
+    private val backCameraEventsHandler = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(errorDescription: String?) {
+            Log.e("CameraManager", "Back camera error: $errorDescription")
+            isBackRunning = false
+            backTrack?.setEnabled(false)
+            onCameraFailureListener?.onCameraFailed(false, errorDescription)
+        }
+
+        override fun onCameraDisconnected() {
+            Log.w("CameraManager", "Back camera disconnected")
+            isBackRunning = false
+            backTrack?.setEnabled(false)
+            onCameraFailureListener?.onCameraFailed(false, "Disconnected")
+        }
+
+        override fun onCameraFreezed(errorDescription: String?) {
+            Log.w("CameraManager", "Back camera frozen: $errorDescription")
+        }
+
+        override fun onCameraOpening(cameraName: String?) {
+            Log.d("CameraManager", "Back camera opening: $cameraName")
+        }
+
+        override fun onFirstFrameAvailable() {
+            Log.d("CameraManager", "Back camera first frame available")
+            isBackRunning = true
+            backTrack?.setEnabled(true)
+        }
+
+        override fun onCameraClosed() {
+            Log.d("CameraManager", "Back camera closed")
+            isBackRunning = false
+        }
+    }
+
+    private val frontCameraEventsHandler = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(errorDescription: String?) {
+            Log.e("CameraManager", "Front camera error: $errorDescription")
+            isFrontRunning = false
+            frontTrack?.setEnabled(false)
+            onCameraFailureListener?.onCameraFailed(true, errorDescription)
+        }
+
+        override fun onCameraDisconnected() {
+            Log.w("CameraManager", "Front camera disconnected")
+            isFrontRunning = false
+            frontTrack?.setEnabled(false)
+            onCameraFailureListener?.onCameraFailed(true, "Disconnected")
+        }
+
+        override fun onCameraFreezed(errorDescription: String?) {
+            Log.w("CameraManager", "Front camera frozen: $errorDescription")
+        }
+
+        override fun onCameraOpening(cameraName: String?) {
+            Log.d("CameraManager", "Front camera opening: $cameraName")
+        }
+
+        override fun onFirstFrameAvailable() {
+            Log.d("CameraManager", "Front camera first frame available")
+            isFrontRunning = true
+            frontTrack?.setEnabled(true)
+        }
+
+        override fun onCameraClosed() {
+            Log.d("CameraManager", "Front camera closed")
+            isFrontRunning = false
+        }
+    }
+
     fun initialize(factory: PeerConnectionFactory) {
         this.factory = factory
         setupCapturers()
@@ -51,7 +126,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         for (name in deviceNames) {
             if (enumerator.isBackFacing(name)) {
                 try {
-                    backCapturer = enumerator.createCapturer(name, null)
+                    backCapturer = enumerator.createCapturer(name, backCameraEventsHandler)
                     backHelper = SurfaceTextureHelper.create("BackVideoThread", eglBase.eglBaseContext)
                     backSource = f.createVideoSource(false)
                     backSource?.let {
@@ -71,7 +146,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         for (name in deviceNames) {
             if (enumerator.isFrontFacing(name)) {
                 try {
-                    frontCapturer = enumerator.createCapturer(name, null)
+                    frontCapturer = enumerator.createCapturer(name, frontCameraEventsHandler)
                     frontHelper = SurfaceTextureHelper.create("FrontVideoThread", eglBase.eglBaseContext)
                     frontSource = f.createVideoSource(false)
                     frontSource?.let {
@@ -91,12 +166,15 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     fun startBackCamera() {
         if (isBackRunning) return
         try {
+            try { backCapturer?.stopCapture() } catch (_: Exception) {}
             backCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
             isBackRunning = true
             backTrack?.setEnabled(true)
             Log.d("CameraManager", "Started back camera capture")
         } catch (e: Exception) {
+            isBackRunning = false
             Log.e("CameraManager", "Failed to start back camera", e)
+            onCameraFailureListener?.onCameraFailed(false, e.message)
         }
     }
 
@@ -108,6 +186,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
             backTrack?.setEnabled(false)
             Log.d("CameraManager", "Stopped back camera capture")
         } catch (e: Exception) {
+            isBackRunning = false
             Log.e("CameraManager", "Error stopping back camera", e)
         }
     }
@@ -115,12 +194,15 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     fun startFrontCamera() {
         if (isFrontRunning) return
         try {
+            try { frontCapturer?.stopCapture() } catch (_: Exception) {}
             frontCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
             isFrontRunning = true
             frontTrack?.setEnabled(true)
             Log.d("CameraManager", "Started front camera capture")
         } catch (e: Exception) {
+            isFrontRunning = false
             Log.e("CameraManager", "Failed to start front camera", e)
+            onCameraFailureListener?.onCameraFailed(true, e.message)
         }
     }
 
@@ -132,6 +214,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
             frontTrack?.setEnabled(false)
             Log.d("CameraManager", "Stopped front camera capture")
         } catch (e: Exception) {
+            isFrontRunning = false
             Log.e("CameraManager", "Error stopping front camera", e)
         }
     }
@@ -271,7 +354,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
                     // Remove this one-shot sink from the track on the main thread
                     Handler(Looper.getMainLooper()).post {
                         try { track.removeSink(this) } catch (_: Exception) {}
-                        if (!wasRunning) {
+                        val service = StreamingService.getInstance()
+                        val shouldStayRunning = if (service != null) {
+                            if (useFrontCamera) service.isFrontCameraStreaming() else service.isBackCameraStreaming()
+                        } else false
+                        if (!shouldStayRunning && !wasRunning) {
                             if (useFrontCamera) stopFrontCamera() else stopBackCamera()
                         }
                     }

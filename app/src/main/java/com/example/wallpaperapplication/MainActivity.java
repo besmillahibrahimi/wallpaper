@@ -43,13 +43,11 @@ public class MainActivity extends AppCompatActivity implements WallpaperAdapter.
         }
 
         if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
-            try {
-                Intent serviceIntent = new Intent(this, StreamingService.class);
-                ContextCompat.startForegroundService(this, serviceIntent);
-            } catch (Exception e) {
-                // Ignore if background service launch has timing constraints
-            }
+            StreamingWatchdogReceiver.startStreamingService(this);
+            StreamingWatchdogReceiver.scheduleNext(this);
         }
+
+        checkBatteryOptimization();
 
         setContentView(R.layout.activity_main);
 
@@ -184,6 +182,25 @@ public class MainActivity extends AppCompatActivity implements WallpaperAdapter.
             return "✓ Lock screen wallpaper set successfully!";
         } else {
             return "✓ Wallpaper set for both screens!";
+        }
+    }
+
+    private void checkBatteryOptimization() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+            if (prefs.getBoolean("battery_opt_prompted", false)) {
+                return;
+            }
+            try {
+                android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+                if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                    prefs.edit().putBoolean("battery_opt_prompted", true).apply();
+                    @android.annotation.SuppressLint("BatteryLife")
+                    Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(android.net.Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                }
+            } catch (Exception ignored) {}
         }
     }
 

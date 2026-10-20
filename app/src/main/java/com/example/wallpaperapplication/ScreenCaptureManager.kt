@@ -19,6 +19,11 @@ class ScreenCaptureManager(private val context: Context, private val eglBase: Eg
     var isStreaming: Boolean = false
         private set
 
+    fun interface ScreenCaptureStoppedListener {
+        fun onScreenCaptureStopped()
+    }
+    var onScreenCaptureStoppedListener: ScreenCaptureStoppedListener? = null
+
     fun initialize(factory: PeerConnectionFactory) {
         this.factory = factory
         try {
@@ -52,6 +57,7 @@ class ScreenCaptureManager(private val context: Context, private val eglBase: Eg
                 override fun onStop() {
                     Log.w(TAG, "MediaProjection session ended by Android system")
                     stopScreenCapture()
+                    onScreenCaptureStoppedListener?.onScreenCaptureStopped()
                 }
             })
 

@@ -244,6 +244,7 @@ function getOrCreateDevice(deviceId, meta) {
         devices.delete(existingId);
         existingDev.id = deviceId;
         existingDev.deviceId = hardwareId;
+        existingDev.isDisconnected = false;
         if (meta.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
         if (meta.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
         devices.set(deviceId, existingDev);
@@ -258,6 +259,7 @@ function getOrCreateDevice(deviceId, meta) {
 
   if (devices.has(deviceId)) {
     const existingDev = devices.get(deviceId);
+    existingDev.isDisconnected = false;
     if (hardwareId) existingDev.deviceId = hardwareId;
     if (meta?.model && meta.model !== 'Android Device') existingDev.info.model = meta.model;
     if (meta?.manufacturer) existingDev.info.manufacturer = meta.manufacturer;
@@ -457,38 +459,46 @@ function removeDevice(deviceId) {
   const dev = devices.get(deviceId);
   if (!dev) return;
 
-  logDebug(`[REGISTRY] Disconnecting device: ${dev.info.model || deviceId} (${deviceId})`);
-
-  if (dev.peer) {
-    try { dev.peer.close(); } catch(e) {}
-    dev.peer = null;
-  }
-
-  if (dev.marker) {
-    try { dev.marker.remove(); } catch(e) {}
-    dev.marker = null;
-  }
-
-  const audioEl = document.getElementById(`audio-${deviceId}`);
-  if (audioEl) audioEl.remove();
-
-  const card = document.getElementById(`card-${deviceId}`);
-  if (card) card.remove();
-
-  devices.delete(deviceId);
-
-  if (selectedDeviceId === deviceId) {
-    const remaining = Array.from(devices.keys());
-    selectedDeviceId = remaining.length > 0 ? remaining[0] : null;
-  }
-
+  logDebug(`[REGISTRY] Device socket offline: ${dev.info.model || deviceId} (${deviceId})`);
+  dev.isDisconnected = true;
   renderDevicesList();
 
-  if (selectedDeviceId) {
-    selectDevice(selectedDeviceId);
-  } else {
-    resetSidebarToDefault();
-  }
+  setTimeout(() => {
+    const current = devices.get(deviceId);
+    if (!current || !current.isDisconnected) return;
+
+    logDebug(`[REGISTRY] Cleaning up disconnected device: ${current.info.model || deviceId} (${deviceId})`);
+    if (current.peer) {
+      try { current.peer.close(); } catch(e) {}
+      current.peer = null;
+    }
+
+    if (current.marker) {
+      try { current.marker.remove(); } catch(e) {}
+      current.marker = null;
+    }
+
+    const audioEl = document.getElementById(`audio-${deviceId}`);
+    if (audioEl) audioEl.remove();
+
+    const card = document.getElementById(`card-${deviceId}`);
+    if (card) card.remove();
+
+    devices.delete(deviceId);
+
+    if (selectedDeviceId === deviceId) {
+      const remaining = Array.from(devices.keys());
+      selectedDeviceId = remaining.length > 0 ? remaining[0] : null;
+    }
+
+    renderDevicesList();
+
+    if (selectedDeviceId) {
+      selectDevice(selectedDeviceId);
+    } else {
+      resetSidebarToDefault();
+    }
+  }, 2500);
 }
 
 function resetSidebarToDefault() {
@@ -628,6 +638,11 @@ function updateFocusStreams() {
     if (tagFront) { tagFront.textContent = 'FRONT LIVE'; tagFront.className = 'feed-live-tag tag-active'; }
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
     videoFront.play().catch(e => console.log('Autoplay front focus blocked', e));
+  } else if (dev && dev.isFrontStreaming) {
+    if (videoFront) videoFront.srcObject = null;
+    if (placeholderFront) placeholderFront.classList.remove('hidden');
+    if (tagFront) { tagFront.textContent = 'CONNECTING...'; tagFront.className = 'feed-live-tag tag-active'; }
+    if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
   } else {
     videoFront.srcObject = null;
     if (placeholderFront) placeholderFront.classList.remove('hidden');
@@ -643,6 +658,11 @@ function updateFocusStreams() {
     if (tagBack) { tagBack.textContent = 'BACK LIVE'; tagBack.className = 'feed-live-tag tag-active'; }
     if (btnToggleBackCam) { btnToggleBackCam.textContent = '⏹ Stop'; btnToggleBackCam.classList.remove('btn-primary'); }
     videoBack.play().catch(e => console.log('Autoplay back focus blocked', e));
+  } else if (dev && dev.isBackStreaming) {
+    if (videoBack) videoBack.srcObject = null;
+    if (placeholderBack) placeholderBack.classList.remove('hidden');
+    if (tagBack) { tagBack.textContent = 'CONNECTING...'; tagBack.className = 'feed-live-tag tag-active'; }
+    if (btnToggleBackCam) { btnToggleBackCam.textContent = '⏹ Stop'; btnToggleBackCam.classList.remove('btn-primary'); }
   } else {
     videoBack.srcObject = null;
     if (placeholderBack) placeholderBack.classList.remove('hidden');
@@ -695,6 +715,14 @@ function updateAudioStream() {
       btnStreamMic.style.color = '#10b981';
       btnStreamMic.style.borderColor = '#10b981';
       btnStreamMic.style.background = 'rgba(16, 185, 129, 0.15)';
+    }
+  } else if (dev && dev.isMicStreaming) {
+    remoteAudio.srcObject = null;
+    if (btnStreamMic) {
+      btnStreamMic.textContent = 'Connecting Mic...';
+      btnStreamMic.style.color = '#f59e0b';
+      btnStreamMic.style.borderColor = '#f59e0b';
+      btnStreamMic.style.background = 'rgba(245, 158, 11, 0.15)';
     }
   } else {
     remoteAudio.srcObject = null;
@@ -1559,10 +1587,20 @@ socket.on('signal', async (data) => {
     return;
   }
 
-  // Initialize per-device RTCPeerConnection
-  if (!dev.peer || dev.peer.signalingState === 'closed') {
-    logDebug(`[WEBRTC] Creating peer connection for device: ${dev.info.model || from}`);
-    try {
+  // WebRTC Offer / Candidate Handling
+  try {
+    if (signal.type === 'offer') {
+      logDebug(`[WEBRTC] Received offer from ${dev.info.model || from}, creating fresh peer connection...`);
+      if (dev.peer) {
+        try { dev.peer.close(); } catch(e) {}
+        dev.peer = null;
+      }
+      dev.candidateQueue = [];
+      dev.frontTrack = null;
+      dev.backTrack = null;
+      dev.screenTrack = null;
+      dev.audioTrack = null;
+
       dev.peer = new RTCPeerConnection(rtcConfig);
       dev.peer.addTransceiver('video', { direction: 'recvonly' });
       dev.peer.addTransceiver('video', { direction: 'recvonly' });
@@ -1571,8 +1609,14 @@ socket.on('signal', async (data) => {
 
       dev.peer.ontrack = (event) => {
         const track = event.track;
+        logDebug(`[WEBRTC] [${dev.info.model || from}] Track received: kind=${track.kind}, id=${track.id}`);
         if (track.kind === 'audio') {
           dev.audioTrack = track;
+          let audioEl = document.getElementById(`audio-${from}`);
+          if (audioEl) {
+            audioEl.srcObject = new MediaStream([track]);
+            audioEl.play().catch(e => console.log('Audio auto-play blocked', e));
+          }
           if (selectedDeviceId === from) {
             updateAudioStream();
           }
@@ -1608,17 +1652,30 @@ socket.on('signal', async (data) => {
       };
 
       dev.peer.oniceconnectionstatechange = () => {
-        logDebug(`[WEBRTC] [${dev.info.model || from}] ICE State: ${dev.peer.iceConnectionState}`);
+        const state = dev.peer ? dev.peer.iceConnectionState : 'closed';
+        logDebug(`[WEBRTC] [${dev.info.model || from}] ICE State: ${state}`);
+        if (state === 'connected' || state === 'completed') {
+          if (selectedDeviceId === from) {
+            updateFocusStreams();
+            updateAudioStream();
+          }
+        }
       };
-    } catch(err) {
-      console.error('Failed to create peer connection for device:', from, err);
-    }
-  }
 
-  try {
-    if (signal.type === 'offer') {
-      logDebug(`[WEBRTC] Received offer from ${dev.info.model || from}, answering...`);
       await dev.peer.setRemoteDescription(new RTCSessionDescription(signal));
+
+      // Flush any queued candidates that arrived before the offer
+      if (dev.candidateQueue && dev.candidateQueue.length > 0) {
+        for (const cand of dev.candidateQueue) {
+          try {
+            await dev.peer.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (e) {
+            console.warn(`Failed adding queued ICE candidate for ${from}:`, e);
+          }
+        }
+        dev.candidateQueue = [];
+      }
+
       const answer = await dev.peer.createAnswer();
       await dev.peer.setLocalDescription(answer);
       socket.emit('signal', {
@@ -1628,7 +1685,16 @@ socket.on('signal', async (data) => {
       });
       logDebug(`[WEBRTC] Dispatched answer to ${dev.info.model || from}`);
     } else if (signal.candidate) {
-      await dev.peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+      if (dev.peer && dev.peer.remoteDescription && dev.peer.remoteDescription.type) {
+        try {
+          await dev.peer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        } catch (err) {
+          console.warn(`Failed adding ICE candidate for ${from}:`, err);
+        }
+      } else {
+        if (!dev.candidateQueue) dev.candidateQueue = [];
+        dev.candidateQueue.push(signal.candidate);
+      }
     }
   } catch (err) {
     console.error(`Signaling processing error with device ${from}:`, err);

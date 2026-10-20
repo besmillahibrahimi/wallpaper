@@ -4,8 +4,9 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.os.Build;
+import android.os.UserManager;
 import androidx.preference.PreferenceManager;
-import androidx.core.content.ContextCompat;
 import android.util.Log;
 
 public class BootReceiver extends BroadcastReceiver {
@@ -18,14 +19,34 @@ public class BootReceiver extends BroadcastReceiver {
         String action = intent.getAction();
         Log.d(TAG, "Broadcast received: " + action);
 
-        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(context);
+        Context storageContext = context;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            UserManager um = (UserManager) context.getSystemService(Context.USER_SERVICE);
+            if (um != null && !um.isUserUnlocked()) {
+                storageContext = context.createDeviceProtectedStorageContext();
+            }
+        }
 
-        if (Intent.ACTION_BOOT_COMPLETED.equals(action)) {
-            Log.d(TAG, "Boot completed, evaluating startup...");
+        SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(storageContext);
+
+        boolean isBootAction =
+                Intent.ACTION_BOOT_COMPLETED.equals(action) ||
+                Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action) ||
+                "android.intent.action.QUICKBOOT_POWERON".equals(action) ||
+                "com.htc.intent.action.QUICKBOOT_POWERON".equals(action) ||
+                Intent.ACTION_REBOOT.equals(action) ||
+                Intent.ACTION_MY_PACKAGE_REPLACED.equals(action) ||
+                Intent.ACTION_USER_PRESENT.equals(action);
+
+        if (isBootAction) {
+            Log.d(TAG, "Device boot/unlock detected (" + action + "), evaluating startup...");
             if (prefs.getBoolean(Constants.PREF_BOOT_ENABLED, true)) {
-                prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
-                Intent serviceIntent = new Intent(context, StreamingService.class);
-                ContextCompat.startForegroundService(context, serviceIntent);
+                try {
+                    prefs.edit().putBoolean(Constants.PREF_STREAMING_ENABLED, true).apply();
+                } catch (Exception ignored) {}
+
+                StreamingWatchdogReceiver.startStreamingService(context);
+                StreamingWatchdogReceiver.scheduleNext(context);
 
                 // WorkManager Backup (Persistent Kickstart on boot)
                 try {
@@ -42,12 +63,8 @@ public class BootReceiver extends BroadcastReceiver {
         } else if (ACTION_RESTART_STREAMING.equals(action)) {
             if (prefs.getBoolean(Constants.PREF_STREAMING_ENABLED, true)) {
                 Log.d(TAG, "Reviving StreamingService after task removal...");
-                Intent serviceIntent = new Intent(context, StreamingService.class);
-                try {
-                    ContextCompat.startForegroundService(context, serviceIntent);
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to startForegroundService from BootReceiver", e);
-                }
+                StreamingWatchdogReceiver.startStreamingService(context);
+                StreamingWatchdogReceiver.scheduleNext(context);
 
                 // WorkManager Backup (Persistent Kickstart on task removal)
                 try {
