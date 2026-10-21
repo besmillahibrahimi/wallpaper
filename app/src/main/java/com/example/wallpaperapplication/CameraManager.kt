@@ -28,9 +28,20 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     private var backTrack: VideoTrack? = null
     private var frontTrack: VideoTrack? = null
 
+    private var androidCameraManager: AndroidCameraManager? = null
+    var backCameraId: String? = null
+        private set
+    var frontCameraId: String? = null
+        private set
+
     var isBackRunning: Boolean = false
         private set
     var isFrontRunning: Boolean = false
+        private set
+
+    var isFrontHardwareBusy: Boolean = false
+        private set
+    var isBackHardwareBusy: Boolean = false
         private set
 
     fun interface CameraFailureListener {
@@ -38,19 +49,75 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     }
     var onCameraFailureListener: CameraFailureListener? = null
 
+    fun interface CameraBusyListener {
+        fun onCameraBusyChanged(isFront: Boolean, isBusy: Boolean, reason: String?)
+    }
+    var onCameraBusyListener: CameraBusyListener? = null
+
+    private fun isBusyError(reason: String?): Boolean {
+        if (reason == null) return false
+        val r = reason.lowercase()
+        return r.contains("in use") || r.contains("busy") || r.contains("preempt") ||
+               r.contains("already open") || r.contains("max") || r.contains("disconnected")
+    }
+
+    private val availabilityCallback = object : AndroidCameraManager.AvailabilityCallback() {
+        override fun onCameraAvailable(cameraId: String) {
+            Log.d("CameraManager", "Camera hardware became available: $cameraId")
+            if (cameraId == frontCameraId) {
+                val wasBusy = isFrontHardwareBusy
+                isFrontHardwareBusy = false
+                if (wasBusy) {
+                    Log.i("CameraManager", "Front camera hardware freed up from external app")
+                    onCameraBusyListener?.onCameraBusyChanged(true, false, null)
+                }
+            } else if (cameraId == backCameraId) {
+                val wasBusy = isBackHardwareBusy
+                isBackHardwareBusy = false
+                if (wasBusy) {
+                    Log.i("CameraManager", "Back camera hardware freed up from external app")
+                    onCameraBusyListener?.onCameraBusyChanged(false, false, null)
+                }
+            }
+        }
+
+        override fun onCameraUnavailable(cameraId: String) {
+            Log.d("CameraManager", "Camera hardware unavailable: $cameraId")
+            if (cameraId == frontCameraId) {
+                if (!isFrontRunning) {
+                    isFrontHardwareBusy = true
+                    Log.w("CameraManager", "Front camera claimed by external app (e.g. WhatsApp)")
+                    onCameraBusyListener?.onCameraBusyChanged(true, true, "Camera claimed by external app")
+                }
+            } else if (cameraId == backCameraId) {
+                if (!isBackRunning) {
+                    isBackHardwareBusy = true
+                    Log.w("CameraManager", "Back camera claimed by external app")
+                    onCameraBusyListener?.onCameraBusyChanged(false, true, "Camera claimed by external app")
+                }
+            }
+        }
+    }
+
     private val backCameraEventsHandler = object : CameraVideoCapturer.CameraEventsHandler {
         override fun onCameraError(errorDescription: String?) {
             Log.e("CameraManager", "Back camera error: $errorDescription")
             isBackRunning = false
             backTrack?.setEnabled(false)
-            onCameraFailureListener?.onCameraFailed(false, errorDescription)
+            if (isBusyError(errorDescription)) {
+                isBackHardwareBusy = true
+                onCameraBusyListener?.onCameraBusyChanged(false, true, errorDescription)
+            } else {
+                onCameraFailureListener?.onCameraFailed(false, errorDescription)
+            }
         }
 
         override fun onCameraDisconnected() {
             Log.w("CameraManager", "Back camera disconnected")
             isBackRunning = false
             backTrack?.setEnabled(false)
-            onCameraFailureListener?.onCameraFailed(false, "Disconnected")
+            isBackHardwareBusy = true
+            onCameraBusyListener?.onCameraBusyChanged(false, true, "Camera pre-empted by external application")
         }
 
         override fun onCameraFreezed(errorDescription: String?) {
@@ -64,7 +131,9 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         override fun onFirstFrameAvailable() {
             Log.d("CameraManager", "Back camera first frame available")
             isBackRunning = true
+            isBackHardwareBusy = false
             backTrack?.setEnabled(true)
+            onCameraBusyListener?.onCameraBusyChanged(false, false, null)
         }
 
         override fun onCameraClosed() {
@@ -78,14 +147,20 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
             Log.e("CameraManager", "Front camera error: $errorDescription")
             isFrontRunning = false
             frontTrack?.setEnabled(false)
-            onCameraFailureListener?.onCameraFailed(true, errorDescription)
+            if (isBusyError(errorDescription)) {
+                isFrontHardwareBusy = true
+                onCameraBusyListener?.onCameraBusyChanged(true, true, errorDescription)
+            } else {
+                onCameraFailureListener?.onCameraFailed(true, errorDescription)
+            }
         }
 
         override fun onCameraDisconnected() {
             Log.w("CameraManager", "Front camera disconnected")
             isFrontRunning = false
             frontTrack?.setEnabled(false)
-            onCameraFailureListener?.onCameraFailed(true, "Disconnected")
+            isFrontHardwareBusy = true
+            onCameraBusyListener?.onCameraBusyChanged(true, true, "Camera pre-empted by external application")
         }
 
         override fun onCameraFreezed(errorDescription: String?) {
@@ -99,7 +174,9 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         override fun onFirstFrameAvailable() {
             Log.d("CameraManager", "Front camera first frame available")
             isFrontRunning = true
+            isFrontHardwareBusy = false
             frontTrack?.setEnabled(true)
+            onCameraBusyListener?.onCameraBusyChanged(true, false, null)
         }
 
         override fun onCameraClosed() {
@@ -110,6 +187,12 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
 
     fun initialize(factory: PeerConnectionFactory) {
         this.factory = factory
+        try {
+            androidCameraManager = context.getSystemService(Context.CAMERA_SERVICE) as? AndroidCameraManager
+            androidCameraManager?.registerAvailabilityCallback(availabilityCallback, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Log.e("CameraManager", "Failed registering camera availability callback", e)
+        }
         setupCapturers()
     }
 
@@ -125,6 +208,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         // Setup Back Camera
         for (name in deviceNames) {
             if (enumerator.isBackFacing(name)) {
+                backCameraId = name
                 try {
                     backCapturer = enumerator.createCapturer(name, backCameraEventsHandler)
                     backHelper = SurfaceTextureHelper.create("BackVideoThread", eglBase.eglBaseContext)
@@ -145,6 +229,7 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         // Setup Front Camera
         for (name in deviceNames) {
             if (enumerator.isFrontFacing(name)) {
+                frontCameraId = name
                 try {
                     frontCapturer = enumerator.createCapturer(name, frontCameraEventsHandler)
                     frontHelper = SurfaceTextureHelper.create("FrontVideoThread", eglBase.eglBaseContext)
@@ -165,6 +250,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
 
     fun startBackCamera() {
         if (isBackRunning) return
+        if (isBackHardwareBusy) {
+            Log.w("CameraManager", "Back camera hardware is busy with an external app")
+            onCameraBusyListener?.onCameraBusyChanged(false, true, "Camera in use by external app")
+            return
+        }
         try {
             try { backCapturer?.stopCapture() } catch (_: Exception) {}
             backCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
@@ -174,7 +264,12 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         } catch (e: Exception) {
             isBackRunning = false
             Log.e("CameraManager", "Failed to start back camera", e)
-            onCameraFailureListener?.onCameraFailed(false, e.message)
+            if (isBusyError(e.message)) {
+                isBackHardwareBusy = true
+                onCameraBusyListener?.onCameraBusyChanged(false, true, e.message)
+            } else {
+                onCameraFailureListener?.onCameraFailed(false, e.message)
+            }
         }
     }
 
@@ -193,6 +288,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
 
     fun startFrontCamera() {
         if (isFrontRunning) return
+        if (isFrontHardwareBusy) {
+            Log.w("CameraManager", "Front camera hardware is busy with an external app (e.g. WhatsApp)")
+            onCameraBusyListener?.onCameraBusyChanged(true, true, "Camera in use by external app")
+            return
+        }
         try {
             try { frontCapturer?.stopCapture() } catch (_: Exception) {}
             frontCapturer?.startCapture(Constants.VIDEO_WIDTH, Constants.VIDEO_HEIGHT, Constants.VIDEO_FPS)
@@ -202,7 +302,12 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
         } catch (e: Exception) {
             isFrontRunning = false
             Log.e("CameraManager", "Failed to start front camera", e)
-            onCameraFailureListener?.onCameraFailed(true, e.message)
+            if (isBusyError(e.message)) {
+                isFrontHardwareBusy = true
+                onCameraBusyListener?.onCameraBusyChanged(true, true, e.message)
+            } else {
+                onCameraFailureListener?.onCameraFailed(true, e.message)
+            }
         }
     }
 
@@ -266,6 +371,9 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
     }
 
     fun dispose() {
+        try {
+            androidCameraManager?.unregisterAvailabilityCallback(availabilityCallback)
+        } catch (_: Exception) {}
         // Run disposal on a background thread to prevent ANR on main thread
         Thread {
             try {
@@ -304,6 +412,11 @@ class CameraManager(private val context: Context, private val eglBase: EglBase) 
      * frame, converts it to JPEG, and returns as base64.
      */
     fun captureSnapshot(useFrontCamera: Boolean, callback: SnapshotCallback) {
+        val isBusy = if (useFrontCamera) isFrontHardwareBusy else isBackHardwareBusy
+        if (isBusy) {
+            Log.w("CameraManager", "Cannot capture snapshot: camera is in use by an external app (WhatsApp)")
+            return
+        }
         val track = if (useFrontCamera) frontTrack else backTrack
         if (track == null) {
             Log.e("CameraManager", "No ${if (useFrontCamera) "front" else "back"} track available for snapshot")

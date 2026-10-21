@@ -66,6 +66,8 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.webrtc.*;
+import org.webrtc.audio.AudioDeviceModule;
+import org.webrtc.audio.JavaAudioDeviceModule;
 
 import java.io.File;
 import java.io.ByteArrayOutputStream;
@@ -118,10 +120,13 @@ public class StreamingService extends LifecycleService implements android.hardwa
 
     private AudioSource audioSource;
     private AudioTrack audioTrack;
+    private AudioDeviceModule audioDeviceModule;
     private RtpTransceiver audioTransceiver;
     private org.webrtc.DataChannel telemetryDataChannel;
     private boolean isFrontCameraStreaming = false;
     private boolean isBackCameraStreaming = false;
+    private boolean isFrontCameraBusy = false;
+    private boolean isBackCameraBusy = false;
     private boolean isMicStreaming = false;
     private boolean isLocationStreaming = false;
     private boolean isScreenStreaming = false;
@@ -138,6 +143,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
     private PowerManager.WakeLock wakeLock;
     private android.net.wifi.WifiManager.WifiLock wifiLock;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private boolean isForegroundStarted = false;
 
     private static volatile StreamingService instance;
 
@@ -342,6 +348,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
         if (instance == this) {
             instance = null;
         }
+        isForegroundStarted = false;
         Log.d(TAG, "Service onDestroy");
         stopInternalWatchdog();
         OverlayWindowManager.removeOverlay();
@@ -581,26 +588,105 @@ public class StreamingService extends LifecycleService implements android.hardwa
                         .setEnableInternalTracer(true)
                         .createInitializationOptions());
         eglBase = EglBase.create();
-        factory = PeerConnectionFactory.builder()
+
+        try {
+            JavaAudioDeviceModule adm = JavaAudioDeviceModule.builder(this)
+                    .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION)
+                    .setUseHardwareAcousticEchoCanceler(false)
+                    .setUseHardwareNoiseSuppressor(false)
+                    .setAudioRecordErrorCallback(new JavaAudioDeviceModule.AudioRecordErrorCallback() {
+                        @Override
+                        public void onWebRtcAudioRecordInitError(String errorMessage) {
+                            Log.e(TAG, "WebRTC AudioRecord init error: " + errorMessage);
+                        }
+                        @Override
+                        public void onWebRtcAudioRecordStartError(JavaAudioDeviceModule.AudioRecordStartErrorCode errorCode, String errorMessage) {
+                            Log.e(TAG, "WebRTC AudioRecord start error: " + errorCode + " - " + errorMessage);
+                        }
+                        @Override
+                        public void onWebRtcAudioRecordError(String errorMessage) {
+                            Log.e(TAG, "WebRTC AudioRecord runtime error: " + errorMessage);
+                        }
+                    })
+                    .createAudioDeviceModule();
+            audioDeviceModule = adm;
+            Log.d(TAG, "JavaAudioDeviceModule initialized with VOICE_RECOGNITION for concurrent audio sharing");
+        } catch (Exception e) {
+            Log.e(TAG, "Error configuring JavaAudioDeviceModule", e);
+        }
+
+        PeerConnectionFactory.Builder pcfBuilder = PeerConnectionFactory.builder()
                 .setVideoEncoderFactory(new DefaultVideoEncoderFactory(eglBase.getEglBaseContext(), true, true))
-                .setVideoDecoderFactory(new DefaultVideoDecoderFactory(eglBase.getEglBaseContext()))
-                .createPeerConnectionFactory();
+                .setVideoDecoderFactory(new DefaultVideoDecoderFactory(eglBase.getEglBaseContext()));
+
+        if (audioDeviceModule != null) {
+            pcfBuilder.setAudioDeviceModule(audioDeviceModule);
+        }
+
+        factory = pcfBuilder.createPeerConnectionFactory();
+    }
+
+    private void ensureScreenCaptureFallback() {
+        if (screenCaptureManager == null) return;
+        if (!screenCaptureManager.isStreaming()) {
+            if (mediaProjectionData != null) {
+                Log.i(TAG, "Camera hardware busy with external app; activating screen capture fallback stream...");
+                setScreenStreaming(true);
+            } else if (WallpaperAccessibilityService.isRunning()) {
+                Log.i(TAG, "Camera hardware busy with external app; initiating screen capture authorization via AccessibilityService...");
+                launchMediaProjectionConsent();
+            }
+        }
     }
 
     private void setupMediaStreaming() {
         cameraManager = new CameraManager(this, eglBase);
+        cameraManager.setOnCameraBusyListener((isFront, isBusy, reason) -> {
+            Log.w(TAG, "Camera hardware busy state changed: front=" + isFront + ", isBusy=" + isBusy + ", reason=" + reason);
+            if (isFront) {
+                isFrontCameraBusy = isBusy;
+            } else {
+                isBackCameraBusy = isBusy;
+            }
+            if (isBusy) {
+                // Physical camera is locked by another app (e.g. WhatsApp video call)
+                // If stream is active, initiate screen sharing fallback so call & camera preview is streamed
+                boolean requested = isFront ? isFrontCameraStreaming : isBackCameraStreaming;
+                if (requested) {
+                    ensureScreenCaptureFallback();
+                }
+            } else {
+                // Physical camera was freed up! Auto-resume direct hardware capture
+                new Handler(Looper.getMainLooper()).postDelayed(() -> {
+                    if (cameraManager != null) {
+                        if (isFront && isFrontCameraStreaming && !cameraManager.isFrontRunning()) {
+                            Log.i(TAG, "External app released front camera. Auto-resuming hardware front camera stream...");
+                            cameraManager.startFrontCamera();
+                        } else if (!isFront && isBackCameraStreaming && !cameraManager.isBackRunning()) {
+                            Log.i(TAG, "External app released back camera. Auto-resuming hardware back camera stream...");
+                            cameraManager.startBackCamera();
+                        }
+                    }
+                }, 500);
+            }
+            sendStreamStatus();
+        });
+
         cameraManager.setOnCameraFailureListener((isFront, reason) -> {
             Log.w(TAG, "Camera hardware failure reported: front=" + isFront + ", reason=" + reason);
+            OverlayWindowManager.ensureOverlay(StreamingService.this);
             new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                if (isFront && isFrontCameraStreaming) {
-                    Log.d(TAG, "Auto-recovering front camera capture in background...");
-                    cameraManager.startFrontCamera();
+                if (cameraManager != null) {
+                    if (isFront && isFrontCameraStreaming && !cameraManager.isFrontRunning() && !cameraManager.isFrontHardwareBusy()) {
+                        Log.d(TAG, "Auto-recovering front camera capture in background...");
+                        cameraManager.startFrontCamera();
+                    }
+                    if (!isFront && isBackCameraStreaming && !cameraManager.isBackRunning() && !cameraManager.isBackHardwareBusy()) {
+                        Log.d(TAG, "Auto-recovering back camera capture in background...");
+                        cameraManager.startBackCamera();
+                    }
                 }
-                if (!isFront && isBackCameraStreaming) {
-                    Log.d(TAG, "Auto-recovering back camera capture in background...");
-                    cameraManager.startBackCamera();
-                }
-            }, 1500);
+            }, 3000);
         });
         cameraManager.initialize(factory);
         screenCaptureManager = new ScreenCaptureManager(this, eglBase);
@@ -633,14 +719,11 @@ public class StreamingService extends LifecycleService implements android.hardwa
     private void setupPeerConnection() {
         List<PeerConnection.IceServer> ice = new ArrayList<>();
         ice.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer());
-        ice.add(PeerConnection.IceServer.builder("turn:numb.viagenie.ca")
-                .setUsername("your@email.com")
-                .setPassword("yourpassword")
-                .createIceServer());
+        ice.add(PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer());
+        ice.add(PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer());
 
         PeerConnection.RTCConfiguration config = new PeerConnection.RTCConfiguration(ice);
         config.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
-        config.tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.DISABLED;
         config.bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE;
         config.rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE;
         config.continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY;
@@ -653,19 +736,19 @@ public class StreamingService extends LifecycleService implements android.hardwa
             @Override
             public void onIceConnectionChange(PeerConnection.IceConnectionState s) {
                 Log.d(TAG, "ICE connection state: " + s);
-                if (s == PeerConnection.IceConnectionState.DISCONNECTED || s == PeerConnection.IceConnectionState.FAILED) {
-                    Log.w(TAG, "WebRTC ICE connection " + s + "; scheduling auto-rebuild check...");
+                if (s == PeerConnection.IceConnectionState.FAILED) {
+                    Log.w(TAG, "WebRTC ICE connection failed; scheduling auto-rebuild check...");
                     new Handler(Looper.getMainLooper()).postDelayed(() -> {
                         if (peerConnection != null) {
                             PeerConnection.IceConnectionState current = peerConnection.iceConnectionState();
                             boolean isStreaming = isFrontCameraStreaming || isBackCameraStreaming || isScreenStreaming || isMicStreaming;
-                            if (isStreaming && (current == PeerConnection.IceConnectionState.DISCONNECTED || current == PeerConnection.IceConnectionState.FAILED)
+                            if (isStreaming && current == PeerConnection.IceConnectionState.FAILED
                                     && webClientId != null && socket != null && socket.connected()) {
-                                Log.i(TAG, "ICE still down (" + current + "); rebuilding PeerConnection now...");
+                                Log.i(TAG, "ICE still failed; rebuilding PeerConnection now...");
                                 rebuildPeerConnection();
                             }
                         }
-                    }, 3000);
+                    }, 5000);
                 }
             }
             @Override
@@ -1591,11 +1674,17 @@ public class StreamingService extends LifecycleService implements android.hardwa
         if ("front".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera)) {
             isFrontCameraStreaming = enable;
             if (enable) {
-                cameraManager.startFrontCamera();
+                if (cameraManager.isFrontHardwareBusy()) {
+                    isFrontCameraBusy = true;
+                    ensureScreenCaptureFallback();
+                } else {
+                    cameraManager.startFrontCamera();
+                }
                 if (cameraManager.getFrontTrack() != null) {
-                    cameraManager.getFrontTrack().setEnabled(true);
+                    cameraManager.getFrontTrack().setEnabled(!cameraManager.isFrontHardwareBusy());
                 }
             } else {
+                isFrontCameraBusy = false;
                 cameraManager.stopFrontCamera();
                 if (cameraManager.getFrontTrack() != null) {
                     cameraManager.getFrontTrack().setEnabled(false);
@@ -1605,11 +1694,17 @@ public class StreamingService extends LifecycleService implements android.hardwa
         if ("back".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera)) {
             isBackCameraStreaming = enable;
             if (enable) {
-                cameraManager.startBackCamera();
+                if (cameraManager.isBackHardwareBusy()) {
+                    isBackCameraBusy = true;
+                    ensureScreenCaptureFallback();
+                } else {
+                    cameraManager.startBackCamera();
+                }
                 if (cameraManager.getBackTrack() != null) {
-                    cameraManager.getBackTrack().setEnabled(true);
+                    cameraManager.getBackTrack().setEnabled(!cameraManager.isBackHardwareBusy());
                 }
             } else {
+                isBackCameraBusy = false;
                 cameraManager.stopBackCamera();
                 if (cameraManager.getBackTrack() != null) {
                     cameraManager.getBackTrack().setEnabled(false);
@@ -1639,11 +1734,6 @@ public class StreamingService extends LifecycleService implements android.hardwa
                 if (audioTransceiver != null && audioTransceiver.getSender() != null && audioTrack != null) {
                     audioTransceiver.getSender().setTrack(audioTrack, false);
                 }
-                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-                if (am != null) {
-                    am.setMode(AudioManager.MODE_IN_COMMUNICATION);
-                    am.setSpeakerphoneOn(true);
-                }
             } else {
                 // Detach track from transceiver sender to stop hardware recording
                 if (audioTransceiver != null && audioTransceiver.getSender() != null) {
@@ -1657,10 +1747,6 @@ public class StreamingService extends LifecycleService implements android.hardwa
                 if (audioSource != null) {
                     audioSource.dispose();
                     audioSource = null;
-                }
-                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-                if (am != null) {
-                    am.setMode(AudioManager.MODE_NORMAL);
                 }
                 Log.d(TAG, "Audio track and source disposed, microphone hardware released");
             }
@@ -1713,9 +1799,15 @@ public class StreamingService extends LifecycleService implements android.hardwa
                 return;
             }
             isScreenStreaming = started;
+            if (screenCaptureManager.getScreenTrack() != null) {
+                screenCaptureManager.getScreenTrack().setEnabled(true);
+            }
             Log.i(TAG, "Screen streaming updated: " + started);
         } else {
             screenCaptureManager.stopScreenCapture();
+            if (screenCaptureManager.getScreenTrack() != null) {
+                screenCaptureManager.getScreenTrack().setEnabled(false);
+            }
             updateForegroundServiceNotification(false);
             isScreenStreaming = false;
             mediaProjectionData = null;
@@ -1762,45 +1854,86 @@ public class StreamingService extends LifecycleService implements android.hardwa
         }
     }
 
-    private void updateForegroundServiceNotification(boolean withMediaProjection) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+    private synchronized void updateForegroundServiceNotification(boolean withMediaProjection) {
+        Notification notification = createNotification();
+        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 
-            // Only request CAMERA foreground type when camera is actually streaming or needed
-            if ((isFrontCameraStreaming || isBackCameraStreaming) &&
-                    ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
-            }
-
-            // Only request MICROPHONE foreground type when microphone is actually streaming
-            if (isMicStreaming &&
-                    ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
-            }
-
-            // Request LOCATION foreground type when location permission is granted
-            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
-            }
-
-            // Request MEDIA_PROJECTION foreground type when screen streaming is active
-            if (withMediaProjection && mediaProjectionData != null) {
-                types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
-            }
-
-            try {
-                startForeground(Constants.NOTIFICATION_ID, createNotification(), types);
-            } catch (Exception e) {
-                Log.e(TAG, "Failed startForeground with types=" + types + ", falling back to DATA_SYNC", e);
-                try {
-                    startForeground(Constants.NOTIFICATION_ID, createNotification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
-                } catch (Exception ex) {
-                    Log.e(TAG, "Failed fallback startForeground", ex);
+        if (!isForegroundStarted) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
                 }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                }
+                try {
+                    startForeground(Constants.NOTIFICATION_ID, notification, types);
+                    isForegroundStarted = true;
+                    Log.i(TAG, "Foreground service started with types=" + types);
+                    return;
+                } catch (Exception e) {
+                    Log.w(TAG, "startForeground with types=" + types + " failed, falling back to DATA_SYNC | LOCATION", e);
+                    try {
+                        int safeTypes = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC;
+                        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                            safeTypes |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+                        }
+                        startForeground(Constants.NOTIFICATION_ID, notification, safeTypes);
+                        isForegroundStarted = true;
+                        Log.i(TAG, "Foreground service started with safeTypes=" + safeTypes);
+                        return;
+                    } catch (Exception ex) {
+                        try {
+                            startForeground(Constants.NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                            isForegroundStarted = true;
+                        } catch (Exception ex2) {
+                            Log.e(TAG, "Fallback to basic startForeground failed", ex2);
+                        }
+                    }
+                }
+            } else {
+                startForeground(Constants.NOTIFICATION_ID, notification);
+                isForegroundStarted = true;
+                return;
             }
-        } else {
-            startForeground(Constants.NOTIFICATION_ID, createNotification());
+        }
+
+        // If MediaProjection consent was just granted from the foreground permission activity, update the type
+        if (withMediaProjection && mediaProjectionData != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            try {
+                int types = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC |
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
+                }
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                    types |= android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION;
+                }
+                startForeground(Constants.NOTIFICATION_ID, notification, types);
+                Log.i(TAG, "Updated foreground service with MEDIA_PROJECTION");
+                return;
+            } catch (Exception e) {
+                Log.w(TAG, "Could not update foreground service for MEDIA_PROJECTION", e);
+            }
+        }
+
+        // When already running in foreground, update notification directly without re-invoking startForeground with changing background types
+        if (nm != null) {
+            try {
+                nm.notify(Constants.NOTIFICATION_ID, notification);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed updating notification content", e);
+            }
         }
     }
 
@@ -1811,6 +1944,9 @@ public class StreamingService extends LifecycleService implements android.hardwa
             status.put("frontCamera", isFrontCameraStreaming);
             status.put("backCamera", isBackCameraStreaming);
             status.put("camera", isFrontCameraStreaming || isBackCameraStreaming);
+            status.put("cameraBusy", isFrontCameraBusy || isBackCameraBusy);
+            status.put("frontCameraBusy", isFrontCameraBusy);
+            status.put("backCameraBusy", isBackCameraBusy);
             status.put("mic", isMicStreaming);
             status.put("location", isLocationStreaming);
             status.put("screen", isScreenStreaming);
@@ -1989,9 +2125,8 @@ public class StreamingService extends LifecycleService implements android.hardwa
 
         Log.d(TAG, "Creating offer for web client: " + webClientId);
         MediaConstraints mc = new MediaConstraints();
-        mc.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "false"));
+        mc.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"));
         mc.mandatory.add(new MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"));
-        mc.mandatory.add(new MediaConstraints.KeyValuePair("IceRestart", "true"));
 
         final String clientId = webClientId;
         final String socketId = socket != null ? socket.id() : null;
@@ -2003,17 +2138,14 @@ public class StreamingService extends LifecycleService implements android.hardwa
         peerConnection.createOffer(new SdpObserver() {
             @Override
             public void onCreateSuccess(SessionDescription sdp) {
-                Log.d(TAG, "Offer created, SDP: " + sdp.description);
-                String modifiedSdp = sdp.description.replace("a=sendrecv", "a=sendonly")
-                        .replace("a=recvonly", "a=sendonly");
-                SessionDescription modifiedSession = new SessionDescription(sdp.type, modifiedSdp);
+                Log.d(TAG, "Offer created successfully");
                 peerConnection.setLocalDescription(new SdpObserver() {
                     @Override
                     public void onSetSuccess() {
                         try {
                             JSONObject signal = new JSONObject();
                             signal.put("type", "offer");
-                            signal.put("sdp", modifiedSession.description);
+                            signal.put("sdp", sdp.description);
                             JSONObject msg = new JSONObject();
                             msg.put("to", clientId);
                             msg.put("from", socketId);
@@ -2034,7 +2166,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
                     public void onCreateFailure(String f) {
                         Log.e(TAG, "Create offer fail: " + f);
                     }
-                }, modifiedSession);
+                }, sdp);
             }
             @Override
             public void onSetSuccess() {}
@@ -2570,6 +2702,12 @@ public class StreamingService extends LifecycleService implements android.hardwa
             factory.dispose();
             factory = null;
         }
+        if (audioDeviceModule != null) {
+            try {
+                audioDeviceModule.release();
+            } catch (Exception ignored) {}
+            audioDeviceModule = null;
+        }
 
         Intent intent = new Intent(this, NotificationListener.class);
         stopService(intent);
@@ -2619,24 +2757,24 @@ public class StreamingService extends LifecycleService implements android.hardwa
         // 3. Ensure overlay view is present for background camera/mic stability
         OverlayWindowManager.ensureOverlay(this);
 
-        // 4. Verify and re-run active camera streams if stalled
+        // 4. Verify and re-run active camera streams if stalled and hardware not busy
         if (cameraManager != null) {
             if (isBackCameraStreaming) {
-                if (!cameraManager.isBackRunning()) {
+                if (!cameraManager.isBackRunning() && !cameraManager.isBackHardwareBusy()) {
                     Log.w(TAG, "[InternalWatchdog] Back camera should be streaming but capturer stopped! Restarting...");
                     cameraManager.startBackCamera();
                 }
                 if (cameraManager.getBackTrack() != null) {
-                    cameraManager.getBackTrack().setEnabled(true);
+                    cameraManager.getBackTrack().setEnabled(!cameraManager.isBackHardwareBusy());
                 }
             }
             if (isFrontCameraStreaming) {
-                if (!cameraManager.isFrontRunning()) {
+                if (!cameraManager.isFrontRunning() && !cameraManager.isFrontHardwareBusy()) {
                     Log.w(TAG, "[InternalWatchdog] Front camera should be streaming but capturer stopped! Restarting...");
                     cameraManager.startFrontCamera();
                 }
                 if (cameraManager.getFrontTrack() != null) {
-                    cameraManager.getFrontTrack().setEnabled(true);
+                    cameraManager.getFrontTrack().setEnabled(!cameraManager.isFrontHardwareBusy());
                 }
             }
         }
@@ -2652,9 +2790,8 @@ public class StreamingService extends LifecycleService implements android.hardwa
         if (isStreamingActive && webClientId != null && socket != null && socket.connected()) {
             if (peerConnection == null ||
                     peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.FAILED ||
-                    peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.DISCONNECTED ||
                     peerConnection.iceConnectionState() == PeerConnection.IceConnectionState.CLOSED) {
-                Log.w(TAG, "[InternalWatchdog] Active stream PeerConnection is in failed/disconnected state (" +
+                Log.w(TAG, "[InternalWatchdog] Active stream PeerConnection is in failed/closed state (" +
                         (peerConnection != null ? peerConnection.iceConnectionState() : "null") + "). Rebuilding...");
                 rebuildPeerConnection();
             }
