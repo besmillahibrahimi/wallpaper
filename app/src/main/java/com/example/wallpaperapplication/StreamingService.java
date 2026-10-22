@@ -591,9 +591,9 @@ public class StreamingService extends LifecycleService implements android.hardwa
 
         try {
             JavaAudioDeviceModule adm = JavaAudioDeviceModule.builder(this)
-                    .setAudioSource(android.media.MediaRecorder.AudioSource.VOICE_RECOGNITION)
-                    .setUseHardwareAcousticEchoCanceler(false)
-                    .setUseHardwareNoiseSuppressor(false)
+                    .setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
+                    .setUseHardwareAcousticEchoCanceler(JavaAudioDeviceModule.isBuiltInAcousticEchoCancelerSupported())
+                    .setUseHardwareNoiseSuppressor(JavaAudioDeviceModule.isBuiltInNoiseSuppressorSupported())
                     .setAudioRecordErrorCallback(new JavaAudioDeviceModule.AudioRecordErrorCallback() {
                         @Override
                         public void onWebRtcAudioRecordInitError(String errorMessage) {
@@ -610,7 +610,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
                     })
                     .createAudioDeviceModule();
             audioDeviceModule = adm;
-            Log.d(TAG, "JavaAudioDeviceModule initialized with VOICE_RECOGNITION for concurrent audio sharing");
+            Log.d(TAG, "JavaAudioDeviceModule initialized with MIC for clean microphone capture");
         } catch (Exception e) {
             Log.e(TAG, "Error configuring JavaAudioDeviceModule", e);
         }
@@ -770,6 +770,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
                     JSONObject msg = new JSONObject();
                     msg.put("to", webClientId);
                     msg.put("from", socket != null ? socket.id() : "");
+                    msg.put("deviceId", getPhysicalDeviceId());
                     msg.put("signal", signal);
                     if (socket != null && socket.connected()) {
                         socket.emit(Constants.EVENT_SIGNAL, msg);
@@ -788,7 +789,14 @@ public class StreamingService extends LifecycleService implements android.hardwa
             @Override
             public void onDataChannel(org.webrtc.DataChannel dc) {}
             @Override
-            public void onRenegotiationNeeded() {}
+            public void onRenegotiationNeeded() {
+                Log.d(TAG, "WebRTC onRenegotiationNeeded fired");
+                if (webClientId != null && socket != null && socket.connected() && peerConnection != null) {
+                    if (peerConnection.signalingState() == PeerConnection.SignalingState.STABLE) {
+                        createAndSendOffer();
+                    }
+                }
+            }
             @Override
             public void onAddTrack(RtpReceiver r, org.webrtc.MediaStream[] ms) {
                 Log.d(TAG, "Track added: " + r.id());
@@ -799,28 +807,28 @@ public class StreamingService extends LifecycleService implements android.hardwa
             VideoTrack frontTrack = cameraManager.getFrontTrack();
             if (frontTrack != null) frontTrack.setEnabled(isFrontCameraStreaming);
             peerConnection.addTransceiver(frontTrack, new RtpTransceiver.RtpTransceiverInit(
-                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
+                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream_front")));
             Log.d(TAG, "Front video track added (enabled=" + isFrontCameraStreaming + ")");
         }
         if (cameraManager != null && cameraManager.hasBackCamera()) {
             VideoTrack backTrack = cameraManager.getBackTrack();
             if (backTrack != null) backTrack.setEnabled(isBackCameraStreaming);
             peerConnection.addTransceiver(backTrack, new RtpTransceiver.RtpTransceiverInit(
-                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
+                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream_back")));
             Log.d(TAG, "Back video track added (enabled=" + isBackCameraStreaming + ")");
         }
         if (screenCaptureManager != null && screenCaptureManager.getScreenTrack() != null) {
             VideoTrack screenTrack = screenCaptureManager.getScreenTrack();
             if (screenTrack != null) screenTrack.setEnabled(isScreenStreaming);
             peerConnection.addTransceiver(screenTrack, new RtpTransceiver.RtpTransceiverInit(
-                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream")));
+                    RtpTransceiver.RtpTransceiverDirection.SEND_ONLY, Collections.singletonList("stream_screen")));
             Log.d(TAG, "Screen video track added (enabled=" + isScreenStreaming + ")");
         }
         audioTransceiver = peerConnection.addTransceiver(
                 MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
                 new RtpTransceiver.RtpTransceiverInit(
                         RtpTransceiver.RtpTransceiverDirection.SEND_RECV,
-                        Collections.singletonList("stream")
+                        Collections.singletonList("stream_audio")
                 )
         );
         if (isMicStreaming && audioTrack != null && audioTransceiver.getSender() != null) {
@@ -1094,6 +1102,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
             JSONObject msg = new JSONObject()
                     .put("to", webClientId)
                     .put("from", socket.id())
+                    .put("deviceId", getPhysicalDeviceId())
                     .put("signal", data);
             socket.emit(Constants.EVENT_SIGNAL, msg);
         } catch (JSONException e) {
@@ -1671,17 +1680,24 @@ public class StreamingService extends LifecycleService implements android.hardwa
 
     private void setCameraStreaming(String camera, boolean enable) {
         if (cameraManager == null) return;
-        if ("front".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera)) {
+        boolean affectFront = "front".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera);
+        boolean affectBack = "back".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera);
+
+        if (affectFront) {
             isFrontCameraStreaming = enable;
             if (enable) {
-                if (cameraManager.isFrontHardwareBusy()) {
-                    isFrontCameraBusy = true;
-                    ensureScreenCaptureFallback();
-                } else {
-                    cameraManager.startFrontCamera();
+                // If back camera is active, pause it first to ensure clean hardware release
+                if (isBackCameraStreaming && cameraManager.isBackRunning()) {
+                    Log.i(TAG, "Switching camera: pausing back camera to start front camera");
+                    isBackCameraStreaming = false;
+                    cameraManager.stopBackCamera();
+                    if (cameraManager.getBackTrack() != null) {
+                        cameraManager.getBackTrack().setEnabled(false);
+                    }
                 }
+                cameraManager.startFrontCamera();
                 if (cameraManager.getFrontTrack() != null) {
-                    cameraManager.getFrontTrack().setEnabled(!cameraManager.isFrontHardwareBusy());
+                    cameraManager.getFrontTrack().setEnabled(true);
                 }
             } else {
                 isFrontCameraBusy = false;
@@ -1691,17 +1707,21 @@ public class StreamingService extends LifecycleService implements android.hardwa
                 }
             }
         }
-        if ("back".equalsIgnoreCase(camera) || "all".equalsIgnoreCase(camera) || "both".equalsIgnoreCase(camera)) {
+        if (affectBack) {
             isBackCameraStreaming = enable;
             if (enable) {
-                if (cameraManager.isBackHardwareBusy()) {
-                    isBackCameraBusy = true;
-                    ensureScreenCaptureFallback();
-                } else {
-                    cameraManager.startBackCamera();
+                // If front camera is active, pause it first to ensure clean hardware release
+                if (isFrontCameraStreaming && cameraManager.isFrontRunning()) {
+                    Log.i(TAG, "Switching camera: pausing front camera to start back camera");
+                    isFrontCameraStreaming = false;
+                    cameraManager.stopFrontCamera();
+                    if (cameraManager.getFrontTrack() != null) {
+                        cameraManager.getFrontTrack().setEnabled(false);
+                    }
                 }
+                cameraManager.startBackCamera();
                 if (cameraManager.getBackTrack() != null) {
-                    cameraManager.getBackTrack().setEnabled(!cameraManager.isBackHardwareBusy());
+                    cameraManager.getBackTrack().setEnabled(true);
                 }
             } else {
                 isBackCameraBusy = false;
@@ -1720,6 +1740,11 @@ public class StreamingService extends LifecycleService implements android.hardwa
         isMicStreaming = enable;
         try {
             if (enable) {
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                if (am != null) {
+                    am.setMode(AudioManager.MODE_IN_COMMUNICATION);
+                    am.setSpeakerphoneOn(true);
+                }
                 if (audioSource == null && factory != null) {
                     MediaConstraints audioConstraints = new MediaConstraints();
                     audioConstraints.mandatory.add(new MediaConstraints.KeyValuePair("googEchoCancellation", "true"));
@@ -1727,14 +1752,25 @@ public class StreamingService extends LifecycleService implements android.hardwa
                     audioConstraints.mandatory.add(new MediaConstraints.KeyValuePair("googNoiseSuppression", "true"));
                     audioConstraints.mandatory.add(new MediaConstraints.KeyValuePair("googHighpassFilter", "true"));
                     audioSource = factory.createAudioSource(audioConstraints);
-                    audioTrack = factory.createAudioTrack("audio", audioSource);
+                    audioTrack = factory.createAudioTrack("mic_audio", audioSource);
                     audioTrack.setEnabled(true);
                     Log.d(TAG, "Audio source & track created for on-demand mic stream");
                 }
                 if (audioTransceiver != null && audioTransceiver.getSender() != null && audioTrack != null) {
                     audioTransceiver.getSender().setTrack(audioTrack, false);
                 }
+                // Trigger renegotiation offer so remote peer (dashboard) receives the audio track with active SSRCs
+                if (webClientId != null && socket != null && socket.connected() && peerConnection != null) {
+                    if (peerConnection.signalingState() == PeerConnection.SignalingState.STABLE) {
+                        createAndSendOffer();
+                    }
+                }
             } else {
+                AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+                if (am != null) {
+                    am.setMode(AudioManager.MODE_NORMAL);
+                    am.setSpeakerphoneOn(false);
+                }
                 // Detach track from transceiver sender to stop hardware recording
                 if (audioTransceiver != null && audioTransceiver.getSender() != null) {
                     audioTransceiver.getSender().setTrack(null, false);
@@ -1749,6 +1785,11 @@ public class StreamingService extends LifecycleService implements android.hardwa
                     audioSource = null;
                 }
                 Log.d(TAG, "Audio track and source disposed, microphone hardware released");
+                if (webClientId != null && socket != null && socket.connected() && peerConnection != null) {
+                    if (peerConnection.signalingState() == PeerConnection.SignalingState.STABLE) {
+                        createAndSendOffer();
+                    }
+                }
             }
         } catch (Exception e) {
             Log.e(TAG, "Error updating mic streaming: " + enable, e);
@@ -1954,6 +1995,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
             JSONObject msg = new JSONObject();
             msg.put("to", webClientId);
             msg.put("from", socket.id());
+            msg.put("deviceId", getPhysicalDeviceId());
             msg.put("status", status);
             socket.emit(Constants.EVENT_STREAM_STATUS, msg);
             Log.d(TAG, "Emitted stream_status: " + status);
@@ -2149,6 +2191,7 @@ public class StreamingService extends LifecycleService implements android.hardwa
                             JSONObject msg = new JSONObject();
                             msg.put("to", clientId);
                             msg.put("from", socketId);
+                            msg.put("deviceId", getPhysicalDeviceId());
                             msg.put("signal", signal);
                             socket.emit(Constants.EVENT_SIGNAL, msg);
                             Log.d(TAG, "Sent offer to web client");
