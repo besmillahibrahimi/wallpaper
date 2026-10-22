@@ -236,7 +236,15 @@ io.on('connection', socket => {
         data.from = socket.id;
       }
     }
-    const targetSocket = resolveTargetSocket(data.to);
+    let targetSocket = resolveTargetSocket(data.to);
+    if (!targetSocket && socketToDevice.has(socket.id) && webClients.size === 1) {
+      const fallbackWebId = Array.from(webClients)[0];
+      const fallbackSock = io.sockets.sockets.get(fallbackWebId);
+      if (fallbackSock && fallbackSock.connected) {
+        targetSocket = fallbackSock;
+        console.log(`Signal recipient ${data.to} redirected to active web client ${fallbackWebId}`);
+      }
+    }
     if (targetSocket) {
       targetSocket.emit('signal', data);
       console.log(`Signal delivered to ${data.to} via socket ${targetSocket.id}`);
